@@ -1,16 +1,16 @@
 import os
 import io
-import tarfile
 import json
 import base64
 import tempfile
 import asyncio
 import logging
 import re
+import sys
 from typing import List, Dict, Any
+import subprocess
+from contextlib import redirect_stdout, redirect_stderr
 
-import docker
-from docker.errors import DockerException
 from fastapi import FastAPI, UploadFile, File, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -28,7 +28,6 @@ load_dotenv()
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Using OpenAI API Key
 OPENAI_MODEL_DEFAULT = "gpt-4o" # Using the latest GPT-4 model
-DOCKER_IMAGE = "data-analyst-agent-image:latest"
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -36,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title="Data Analyst Agent API",
-    description="An agent that uses LLMs and a secure Docker environment to analyze data.",
+    description="An agent that uses LLMs and a secure environment to analyze data.",
 )
 
 # --- CORS Middleware ---
@@ -49,14 +48,6 @@ app.add_middleware(
 )
 
 # --- Global Clients ---
-try:
-    docker_client = docker.from_env()
-    docker_client.ping()
-    logging.info("✅ Docker client initialized and connected successfully.")
-except DockerException:
-    logging.error("❌ Docker daemon is not running. Please start Docker Desktop.")
-    docker_client = None
-
 if not OPENAI_API_KEY:
     logging.warning("⚠️ OPENAI_API_KEY is not set. The application may not function correctly.")
     openai_client = None
@@ -129,7 +120,7 @@ async def get_dashboard(request: Request):
                 <div id="loading" class="hidden flex flex-col justify-center items-center mt-8 text-center">
                     <div class="loader"></div>
                     <p class="mt-4 text-gray-600">Analyzing, please wait...</p>
-                    <p class="text-sm text-gray-500">(This can take up to 3 minutes)</p>
+                    <p class="text-sm text-gray-500">(Complex queries can take up to 6 minutes)</p>
                 </div>
 
                 <div id="results" class="mt-8 hidden">
@@ -236,59 +227,55 @@ def extract_python_code(llm_response: str) -> str:
     raise ValueError("Could not extract Python code from the LLM response.")
 
 
-async def run_python_in_docker(script: str, files: Dict[str, bytes]) -> Dict[str, Any]:
+def execute_generated_code(script: str, files: Dict[str, bytes]) -> Dict[str, Any]:
     """
-    Executes a Python script inside a secure, pre-built Docker container.
+    Executes a Python script in a temporary directory using exec(),
+    capturing its stdout.
     """
-    if not docker_client:
-        raise HTTPException(status_code=503, detail="Docker is not available or running.")
-
     with tempfile.TemporaryDirectory() as temp_dir:
         for filename, content in files.items():
-            # Ensure filename is not empty before creating the path
             if filename:
                 file_path = os.path.join(temp_dir, filename)
                 with open(file_path, "wb") as f:
                     f.write(content)
         
-        script_path = os.path.join(temp_dir, "main.py")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script)
-
+        original_cwd = os.getcwd()
+        os.chdir(temp_dir)
+        
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        
         try:
-            logging.info(f"Running script in Docker container using image: {DOCKER_IMAGE}")
-            container = docker_client.containers.run(
-                DOCKER_IMAGE,
-                command=["python", "main.py"],
-                volumes={temp_dir: {"bind": "/app", "mode": "rw"}},
-                working_dir="/app",
-                detach=True,
-            )
-
-            result = container.wait(timeout=170)
-            exit_code = result.get("StatusCode", -1)
-
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors='ignore')
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors='ignore')
+            logging.info(f"Running generated code in-process within {temp_dir}")
             
-            container.remove(force=True)
+            # Redirect stdout and stderr to capture the output
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                exec(script, {})
 
-            logging.info(f"Container finished with exit code: {exit_code}")
+            stdout = stdout_capture.getvalue()
+            stderr = stderr_capture.getvalue()
+            
+            logging.info(f"In-process execution finished.")
             if stdout: logging.info(f"STDOUT:\n{stdout}")
             if stderr: logging.warning(f"STDERR:\n{stderr}")
             
-            return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code}
-        except docker.errors.ImageNotFound:
-            logging.error(f"Docker image '{DOCKER_IMAGE}' not found. Please build it first.")
-            raise HTTPException(status_code=500, detail=f"Execution environment not found. Run 'docker build -t {DOCKER_IMAGE} .'")
+            return {
+                "stdout": stdout, 
+                "stderr": stderr, 
+                "exit_code": 0
+            }
         except Exception as e:
-            logging.error(f"An unexpected error occurred during Docker execution: {e}")
-            if "container" in locals() and container:
-                try:
-                    container.remove(force=True)
-                except docker.errors.NotFound:
-                    pass
-            raise HTTPException(status_code=500, detail=f"An unexpected error occurred during code execution: {e}")
+            error_details = f"{type(e).__name__}: {str(e)}"
+            logging.error(f"An unexpected error occurred during code execution: {error_details}")
+            # Return a controlled error format
+            return {
+                "stdout": json.dumps({"error": error_details}),
+                "stderr": str(e),
+                "exit_code": 1
+            }
+        finally:
+            # Always change back to the original directory
+            os.chdir(original_cwd)
 
 
 @app.post("/api/")
@@ -296,7 +283,8 @@ async def api(request: Request):
     """
     Main API endpoint that receives multipart form data and processes the analysis request.
     """
-    timeout_sec = int(os.getenv("AGENT_TIMEOUT_SEC", "170"))
+    # Increased timeout for the entire request
+    timeout_sec = int(os.getenv("AGENT_TIMEOUT_SEC", "350"))
     try:
         return await asyncio.wait_for(handle_request(request), timeout=timeout_sec)
     except asyncio.TimeoutError:
@@ -360,18 +348,18 @@ async def handle_request(request: Request):
     if html_content:
         all_input_files["scraped_page.html"] = html_content.encode('utf-8')
     
-    logging.info(f"Files being passed to Docker: {list(all_input_files.keys())}")
+    logging.info(f"Files being passed to execution environment: {list(all_input_files.keys())}")
 
 
     system_prompt = (
         "You are an expert Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
         "The script will be executed in a secure environment with pandas, matplotlib, beautifulsoup4, and duckdb installed. "
-        "The script's **ONLY** output must be a **single JSON array or object** printed to standard output that contains the final, raw answer values. Do not include descriptive text.\n\n"
+        "The script's **ONLY** output to **standard output (stdout)** must be a **single JSON array or object** that contains the final, raw answer values. Do not include descriptive text. All other logs or debug information must be written to **standard error (stderr)**.\n\n"
         "Respond ONLY with the Python code inside a markdown block: ```python\n...code...\n```\n\n"
         "---"
         "CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT:\n"
-        "1.  **Imports**: Always start the script with all necessary imports, including `import pandas as pd`, `import json`, `import numpy as np`, `import sys`, and `import duckdb`.\n"
-        "2.  **Debugging**: For debugging, the very first thing your script should do is print the list of files in the current directory to stderr. Example: `import os, sys; print(f'Files in /app: {os.listdir(\".\")}', file=sys.stderr)`\n"
+        "1.  **Imports**: Always start the script with all necessary imports, including `import pandas as pd`, `import json`, `import numpy as np`, `import sys`, `import duckdb`, and `import matplotlib`. **Crucially, you must set the Matplotlib backend to 'Agg' immediately after importing it: `matplotlib.use('Agg')` to prevent GUI errors in a server environment.**\n"
+        "2.  **Debugging**: For debugging, the very first thing your script should do is print the list of files in the current directory to stderr. Example: `import os, sys; print(f'Files in current directory: {os.listdir(\".\")}', file=sys.stderr)`\n"
         "3.  **Determine Data Source & Task Type**: After debugging, analyze the user's question and the list of available files to determine the task."
         "    - **Scenario A: Web Scraping.** If the user asks to 'scrape a URL' and `scraped_page.html` is in the 'Files available' list, your primary data source is that HTML file. "
         "    - **Scenario B: File Analysis.** If the user asks to analyze a specific file (e.g., 'Analyze `sample-sales.csv`') AND that file's name appears in the 'Files available' list, you MUST load it directly by its name from the current directory (e.g., `pd.read_csv('sample-sales.csv')`). "
@@ -408,13 +396,13 @@ async def handle_request(request: Request):
     try:
         python_code = extract_python_code(llm_response_text)
     except ValueError as e:
-        logging.error(f"Failed to extract code from LLM response: {llm_response_text}")
+        logging.error(f"Failed to extract code from LLM response: {ll_response_text}")
         raise HTTPException(status_code=500, detail=f"Could not generate a valid script from the LLM. Response: {llm_response_text}")
 
-    docker_result = await run_python_in_docker(python_code, all_input_files)
+    exec_result = await asyncio.to_thread(execute_generated_code, python_code, all_input_files)
 
-    stdout = docker_result.get("stdout", "").strip()
-    stderr = docker_result.get("stderr", "").strip()
+    stdout = exec_result.get("stdout", "").strip()
+    stderr = exec_result.get("stderr", "").strip()
     
     try:
         final_json_output = json.loads(stdout)
@@ -425,8 +413,8 @@ async def handle_request(request: Request):
         return JSONResponse(content=final_json_output)
     
     except json.JSONDecodeError:
-        if docker_result["exit_code"] != 0:
-            error_message = f"Script execution failed with exit code {docker_result['exit_code']}."
+        if exec_result["exit_code"] != 0:
+            error_message = f"Script execution failed with exit code {exec_result['exit_code']}."
             details = stderr if stderr else stdout
             logging.error(f"{error_message} Details: {details}")
             raise HTTPException(status_code=500, detail=f"{error_message} Details: {details}")
@@ -442,16 +430,10 @@ async def handle_request(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    if not os.path.exists("Dockerfile"):
-        logging.warning("⚠️ Dockerfile not found. Make sure you have a Dockerfile to build the agent's execution environment.")
+    # This check is not relevant for deployment environments like Render
+    # if not os.path.exists("Dockerfile"):
+    #     logging.warning("⚠️ Dockerfile not found. Make sure you have a Dockerfile to build the agent's execution environment.")
     
-    if docker_client:
-        try:
-            docker_client.images.get(DOCKER_IMAGE)
-            logging.info(f"✅ Docker image '{DOCKER_IMAGE}' found.")
-        except docker.errors.ImageNotFound:
-            logging.warning(f"⚠️ Docker image '{DOCKER_IMAGE}' not found. Please build it using 'docker build -t {DOCKER_IMAGE} .'")
-
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "10000"))
     logging.info(f"🚀 Starting server on http://0.0.0.0:{port}")
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
