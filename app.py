@@ -26,8 +26,8 @@ import requests
 load_dotenv()
 
 # --- API Keys and Model Configuration ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Using OpenAI API Key
-OPENAI_MODEL_DEFAULT = "gpt-4o" # Using the latest GPT-4 model
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL_DEFAULT = "gpt-4o"
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -430,7 +430,6 @@ async def handle_request(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    # This check is not relevant for deployment environments like Render
     # if not os.path.exists("Dockerfile"):
     #     logging.warning("⚠️ Dockerfile not found. Make sure you have a Dockerfile to build the agent's execution environment.")
     
