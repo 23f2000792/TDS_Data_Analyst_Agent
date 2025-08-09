@@ -1,24 +1,17 @@
-FROM python:3.10-slim
+# Use a current, slim Python runtime as a parent image
+FROM python:3.11-slim
 
-# Install system dependencies, including those for lxml
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        libxml2-dev \
-        libxslt-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set work directory
+# Set the working directory in the container
 WORKDIR /app
 
-# Copy only requirements first for layer caching
+# Copy the requirements file into the container at /app
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir --upgrade pip -r requirements.txt
 
-# Copy the rest of your application code
+# Copy the rest of the application's code (app.py) into the container
 COPY . .
 
-# Default command
-CMD ["python", "main.py"]
+# Command to run the application using uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]
