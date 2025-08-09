@@ -18,6 +18,7 @@ scikit-learn
 beautifulsoup4
 lxml
 sqlalchemy
+openai
 
 # For loading environment variables from .env file
 python-dotenv
