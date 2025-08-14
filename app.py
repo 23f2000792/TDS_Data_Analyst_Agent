@@ -72,7 +72,7 @@ def generate_python_code(prompt: str) -> str:
 
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
-        "The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
+        "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
         "Do not include descriptive text. All other logs or debug information must be written to **standard error (stderr)**.\n\n"
         "Respond ONLY with the Python code inside a markdown block: ```python\n...code...\n```\n\n"
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
@@ -180,14 +180,28 @@ def json_serializer_helper(obj):
 # 3. API ENDPOINTS
 # ==============================================================================
 
-async def handle_analysis_request(data_file: UploadFile, question_text: str):
+async def handle_analysis_request(question_text: str, data_file: Optional[UploadFile] = None):
     """Core logic to handle the analysis request."""
     attachment_files: Dict[str, bytes] = {}
     if data_file and data_file.filename:
         attachment_files[data_file.filename] = await data_file.read()
         logging.info(f"Prepared data file for sandbox: {data_file.filename}")
     else:
-        raise HTTPException(status_code=400, detail="Data file is missing from the request.")
+        logging.info("No data file provided with the request.")
+
+
+    if "scrape" in question_text.lower() or "from the url" in question_text.lower():
+        url_match = re.search(r"https?://\S+", question_text)
+        if url_match:
+            url = url_match.group(0).rstrip('.,)!?]>')
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                response = requests.get(url, headers=headers, timeout=15)
+                response.raise_for_status()
+                attachment_files["scraped_page.html"] = response.content
+                logging.info(f"Successfully scraped content from {url}")
+            except requests.RequestException as e:
+                logging.error(f"Failed to scrape URL {url}: {e}")
 
     user_prompt = (
         f"User Question:\n---\n{question_text}\n---\n\n"
@@ -219,23 +233,24 @@ async def analyze(request: Request):
         form_data = await request.form()
         logger.info(f"Received form data with keys: {list(form_data.keys())}")
         
-        question_text = form_data.get("question") or form_data.get("prompt")
+        # The question file is always expected.
+        question_file = form_data.get("questions.txt")
+        if not question_file or not isinstance(question_file, UploadFile):
+             raise HTTPException(status_code=422, detail="Missing 'questions.txt' file in form data.")
         
+        question_text = (await question_file.read()).decode('utf-8')
+        logger.info("Successfully read 'questions.txt'.")
+        
+        # Data files are optional. Find the first one that isn't questions.txt
         data_file = None
         for key, value in form_data.items():
-            if isinstance(value, UploadFile):
+            if isinstance(value, UploadFile) and key != "questions.txt":
                 data_file = value
-                logger.info(f"Found uploaded file '{data_file.filename}' under form key '{key}'")
+                logger.info(f"Found optional data file '{data_file.filename}' under form key '{key}'")
                 break
 
-        if not question_text or not isinstance(question_text, str):
-            raise HTTPException(status_code=422, detail="Could not find a 'question' or 'prompt' field in the form data.")
-        
-        if not data_file:
-            raise HTTPException(status_code=422, detail="No file upload found in the form data.")
-
         return await asyncio.wait_for(
-            handle_analysis_request(data_file, question_text), 
+            handle_analysis_request(question_text, data_file), 
             timeout=REQUEST_TIMEOUT_SEC
         )
     except HTTPException as e:
@@ -313,17 +328,17 @@ async def get_dashboard():
                 <label for="questions_file">Questions File (.txt) <span style="color:#dc3545">*</span></label>
                 <div class="file-input-wrapper">
                     <div class="file-input" id="questionsDrop">
-                        <input type="file" id="questions_file" name="questions_file" accept=".txt" required/>
+                        <input type="file" id="questions_file" name="questions.txt" accept=".txt" required/>
                         <span>📁 Click to upload your questions (.txt)</span>
                     </div>
                 </div>
                 <div id="questionsInfo" class="file-info"></div>
             </div>
             <div class="form-group">
-              <label for="data_file">Upload Dataset <span style="color:#dc3545">*</span></label>
+              <label for="data_file">Upload Dataset (Optional)</label>
               <div class="file-input-wrapper">
                 <div class="file-input" id="dataDrop">
-                  <input type="file" id="data_file" name="file" required/>
+                  <input type="file" id="data_file" name="data.csv" />
                   <span>📁 Click or drag & drop your dataset</span>
                 </div>
               </div>
@@ -384,59 +399,33 @@ async def get_dashboard():
           }
           async handleSubmit(event) {
             event.preventDefault();
-            const questionFile = this.qFileInput.files[0];
-            const dataFile = this.dFileInput.files[0];
-
-            if (!questionFile) {
-                alert('Please upload a questions.txt file.');
-                return;
-            }
-            if (!dataFile) {
-                alert('Please upload a data file.');
-                return;
-            }
-
             this.showLoading(true);
-
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const questionText = e.target.result;
-                    const formData = new FormData();
-                    formData.append('file', dataFile);
-                    formData.append('question', questionText);
-
-                    const response = await fetch('/', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    if (!response.ok) {
-                        // Try to parse error JSON, but fall back to status text
-                        let errorDetail = `HTTP Error: ${response.status} ${response.statusText}`;
-                        try {
-                            const errorJson = await response.json();
-                            errorDetail = errorJson.detail || JSON.stringify(errorJson);
-                        } catch (jsonError) {
-                            // The error response was not JSON, do nothing
-                        }
-                        throw new Error(errorDetail);
+            try {
+                const formData = new FormData(this.form);
+                const response = await fetch('/', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    let errorDetail = `HTTP Error: ${response.status} ${response.statusText}`;
+                    try {
+                        const errorJson = await response.json();
+                        errorDetail = errorJson.detail || JSON.stringify(errorJson);
+                    } catch (jsonError) {
+                        // The error response was not JSON, do nothing
                     }
-
-                    const data = await response.json();
-                    this.displayResults(data);
-
-                } catch (err) {
-                    this.displayError(err.message);
-                } finally {
-                    this.showLoading(false);
+                    throw new Error(errorDetail);
                 }
-            };
-            reader.onerror = (e) => {
-                this.displayError('Failed to read the question file.');
+
+                const data = await response.json();
+                this.displayResults(data);
+
+            } catch (err) {
+                this.displayError(err.message);
+            } finally {
                 this.showLoading(false);
-            };
-            reader.readAsText(questionFile);
+            }
           }
           displayResults(data) {
             this.resultsContent.innerHTML = '';
