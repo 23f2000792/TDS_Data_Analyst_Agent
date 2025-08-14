@@ -8,14 +8,15 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import networkx as nx
 import io
 import subprocess
 import logging
 from io import BytesIO, StringIO
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, Response, FileResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -24,7 +25,7 @@ import requests
 try:
     from PIL import Image
     PIL_AVAILABLE = True
-except Exception:
+except ImportError:
     PIL_AVAILABLE = False
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -39,7 +40,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="TDS Data Analyst Agent")
+app = FastAPI(title="Data Analyst Agent")
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,7 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 180))
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 170))
 
 # -----------------------------
 # Tool and Utility Functions
@@ -64,7 +65,6 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.google.com/",
         }
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
@@ -75,8 +75,6 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
             df = pd.read_csv(BytesIO(resp.content))
         elif any(url.lower().endswith(ext) for ext in (".xls", ".xlsx")) or "spreadsheetml" in ctype:
             df = pd.read_excel(BytesIO(resp.content))
-        elif url.lower().endswith(".parquet"):
-            df = pd.read_parquet(BytesIO(resp.content))
         elif "json" in ctype or url.lower().endswith(".json"):
             df = pd.json_normalize(resp.json())
         elif "html" in ctype:
@@ -98,7 +96,7 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 def clean_llm_output(output: str) -> Dict:
-    """Extracts a JSON object from a string."""
+    """Extracts a JSON object from a string, handling markdown fences."""
     try:
         s = re.sub(r"^```(?:json)?\s*", "", output.strip())
         s = re.sub(r"\s*```$", "", s)
@@ -107,10 +105,10 @@ def clean_llm_output(output: str) -> Dict:
         logger.error(f"Failed to parse LLM JSON output: {e}\nRaw output:\n{output}")
         return {"error": "Failed to parse JSON from LLM output", "raw": output}
 
-def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
-    """Executes Python code in a sandboxed environment."""
+def write_and_run_temp_python(code: str, injected_pickle: str = None) -> Dict[str, Any]:
+    """Executes Python code in a sandboxed environment with all required libraries."""
     preamble = [
-        "import json, sys, base64, pandas as pd, numpy as np, matplotlib, networkx as nx, seaborn as sns",
+        "import json, sys, base64, pandas as pd, numpy as np, matplotlib, seaborn as sns, networkx as nx",
         "matplotlib.use('Agg')",
         "import matplotlib.pyplot as plt",
         "from io import BytesIO"
@@ -127,10 +125,9 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
 def plot_to_base64():
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=90)
-    plt.clf() # Clear the current figure to avoid overlap
+    plt.clf() # Clear the current figure to avoid plots overlapping
     buf.seek(0)
     img_bytes = buf.getvalue()
-    # Always return the full data URI for images
     return "data:image/png;base64," + base64.b64encode(img_bytes).decode('ascii')
 '''
     script_lines = preamble + [helper, "\nresults = {}\n", code, "\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n"]
@@ -140,12 +137,12 @@ def plot_to_base64():
         tmp.write("\n".join(script_lines))
 
     try:
-        proc = subprocess.run([sys.executable, tmp_path], capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run([sys.executable, tmp_path], capture_output=True, text=True, timeout=LLM_TIMEOUT_SECONDS - 10)
         if proc.returncode != 0:
             return {"status": "error", "message": proc.stderr or proc.stdout}
         return json.loads(proc.stdout)
     except subprocess.TimeoutExpired:
-        return {"status": "error", "message": "Execution timed out"}
+        return {"status": "error", "message": "Code execution timed out"}
     except json.JSONDecodeError as e:
         return {"status": "error", "message": f"Failed to decode JSON from script: {e}"}
     finally:
@@ -159,19 +156,20 @@ def plot_to_base64():
 llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o"), temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
 tools = [scrape_url_to_dataframe]
 
-# This robust prompt is the key to solving the evaluation errors.
+# This hardened prompt is the most critical part of the solution.
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a data analyst agent. Your goal is to write a Python script to answer questions based on the user's request.
+    ("system", """You are a data analyst agent. Your sole purpose is to write a Python script to answer questions.
 
-You will be given a request that specifies a desired JSON output format with a list of keys.
+You will be given a request that explicitly lists the required keys for a final JSON object.
 
-You MUST follow these rules:
-1.  Generate a Python script that populates a dictionary named `results`.
-2.  The keys in your `results` dictionary MUST EXACTLY MATCH the keys specified in the user's request (e.g., `edge_count`, `total_sales`, `average_temp_c`).
-3.  Do NOT use the full question text as a dictionary key. Use only the simple, specified keys.
-4.  The user's data, if provided, is loaded into a pandas DataFrame called `df`.
-5.  You have access to a `plot_to_base64()` helper function for creating images. Use it for any chart or graph.
-6.  Your final output MUST be a single JSON object with ONE key: "code". The value of "code" must be the complete Python script as a single string.
+YOU MUST OBEY THESE RULES:
+1.  Your output MUST BE a single JSON object with ONE key: "code". The value must be a string containing a valid Python script.
+2.  The Python script you write MUST populate a dictionary named `results`.
+3.  The keys in the `results` dictionary MUST EXACTLY MATCH the keys specified in the user's request (e.g., `edge_count`, `total_sales`).
+4.  Do NOT use the full question text as a dictionary key. Only use the simple, specified keys.
+5.  The user's data, if provided, is in a pandas DataFrame called `df`.
+6.  For any chart or graph, you MUST use the provided `plot_to_base64()` helper function.
+7.  Ensure all code is self-contained and all variables are defined before use.
 
 Example of your required output format:
 {
@@ -210,8 +208,6 @@ async def analyze_data(questions_file: UploadFile = File(...), data_file: Option
                 df = pd.read_csv(BytesIO(content))
             elif filename.endswith((".xlsx", ".xls")):
                 df = pd.read_excel(BytesIO(content))
-            elif filename.endswith(".parquet"):
-                df = pd.read_parquet(BytesIO(content))
             else:
                 raise HTTPException(400, f"Unsupported data file type: {filename}")
 
@@ -220,15 +216,10 @@ async def analyze_data(questions_file: UploadFile = File(...), data_file: Option
                     pickle_path = temp_pkl.name
                     df.to_pickle(pickle_path)
                 
-                df_preview = (
-                    f"\n--- Dataset Preview (available as `df` in your script) ---\n"
-                    f"Columns: {', '.join(df.columns.astype(str))}\n"
-                    f"First 5 rows:\n{df.head(5).to_markdown(index=False)}\n"
-                )
+                df_preview = (f"\n--- Dataset Preview (available as `df` in your script) ---\n{df.head(3).to_markdown()}\n")
         
         llm_input = f"User Request:\n{raw_questions}\n{df_preview}"
 
-        # Run agent
         response = agent_executor.invoke({"input": llm_input})
         raw_out = response.get("output", "")
         if not raw_out:
@@ -242,7 +233,7 @@ async def analyze_data(questions_file: UploadFile = File(...), data_file: Option
         if not code:
             raise HTTPException(500, f"Agent did not return a 'code' block. Response: {parsed}")
 
-        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
+        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path)
         if exec_result.get("status") != "success":
             raise HTTPException(500, f"Code execution failed: {exec_result.get('message')}")
 
@@ -257,7 +248,8 @@ async def analyze_data(questions_file: UploadFile = File(...), data_file: Option
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    return Response(content=base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII="), media_type="image/png")
+    favicon_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII=")
+    return Response(content=favicon_bytes, media_type="image/png")
 
 if __name__ == "__main__":
     import uvicorn
