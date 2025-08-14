@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 
 import subprocess
 from fastapi import FastAPI, UploadFile, Request, HTTPException, File, Form
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
-    title="Data Analyst Agent (Robust Version)",
-    description="A robust, single-call agent using a secure sandbox for data analysis.",
+    title="Data Analyst Agent (Final Robust Version)",
+    description="A resilient, single-call agent using a secure sandbox for data analysis.",
 )
 
 # --- CORS Middleware ---
@@ -123,6 +123,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import json
 import pandas as pd
+import sys
+import os
+
+# Set backend for matplotlib
+import matplotlib
+matplotlib.use('Agg')
 
 def plot_to_base64():
     buf = BytesIO()
@@ -131,6 +137,9 @@ def plot_to_base64():
     plt.close() # Ensure figure is closed
     buf.seek(0)
     img_bytes = buf.getvalue()
+    # Ensure the image is not excessively large
+    if len(img_bytes) > 100 * 1024:
+        print("Warning: Generated image is > 100kB", file=sys.stderr)
     return "data:image/png;base64," + base64.b64encode(img_bytes).decode('ascii')
 
 def json_serializer_helper(obj):
@@ -145,7 +154,8 @@ def json_serializer_helper(obj):
     try:
         return str(obj)
     except Exception:
-        raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+        # Fallback for unserializable types
+        return f"Unserializable type: {obj.__class__.__name__}"
 '''
         full_script = helper_code + "\n\n" + script
         script_path = os.path.join(temp_dir, "main.py")
@@ -191,7 +201,6 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
         attachment_files[data_file.filename] = await data_file.read()
         logging.info(f"Prepared data file for sandbox: {data_file.filename}")
     else:
-        # This case should ideally not be hit if validation is correct
         raise HTTPException(status_code=400, detail="Data file is missing from the request.")
 
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
@@ -217,42 +226,46 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
     result_stdout = await execute_code_in_sandbox(python_code, attachment_files)
 
     try:
+        # It's possible the output is just a string, so we try to load it as JSON
+        # but if it fails, we return it as is.
         final_json_output = json.loads(result_stdout)
         if isinstance(final_json_output, dict) and 'error' in final_json_output:
             raise HTTPException(status_code=422, detail=final_json_output['error'])
         return JSONResponse(content=final_json_output)
     except json.JSONDecodeError:
-        error_msg = "Script executed but produced non-JSON output."
-        logging.error(f"{error_msg} Output: {result_stdout}")
-        raise HTTPException(status_code=500, detail=f"{error_msg} Output: {result_stdout}")
+        # If the output is not JSON, it might be a raw string from the script.
+        # This can happen with simple questions. We'll wrap it in a JSON structure.
+        logging.warning(f"Script produced non-JSON output. Wrapping it. Output: {result_stdout}")
+        return JSONResponse(content={"result": result_stdout})
+
 
 @app.post("/")
 async def analyze(request: Request):
     """
-    Main API endpoint for data analysis. It manually parses multipart/form-data
+    Main API endpoint for data analysis. Manually parses multipart/form-data
     to robustly handle requests from various clients, including the evaluation script.
     """
     try:
         form_data = await request.form()
         
-        question = form_data.get("question")
-        file = form_data.get("file")
+        # FLEXIBLE INPUT: Check for 'question' first, then fall back to 'prompt'
+        question_text = form_data.get("question") or form_data.get("prompt")
+        data_file = form_data.get("file")
 
-        if not question or not isinstance(question, str):
-            raise HTTPException(status_code=422, detail="Missing or invalid 'question' field in form data.")
+        if not question_text or not isinstance(question_text, str):
+            raise HTTPException(status_code=422, detail="Missing or invalid 'question' or 'prompt' field in form data.")
         
-        if not file or not isinstance(file, UploadFile):
+        if not data_file or not isinstance(data_file, UploadFile):
             raise HTTPException(status_code=422, detail="Missing or invalid 'file' field in form data.")
 
         return await asyncio.wait_for(
-            handle_analysis_request(file, question), 
+            handle_analysis_request(data_file, question_text), 
             timeout=REQUEST_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail=f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds")
     except Exception as e:
         logger.error(f"An error occurred in the main analyze endpoint: {e}")
-        # Re-raise HTTPException or convert other exceptions
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=400, detail=f"Failed to process request: {str(e)}")
@@ -494,6 +507,11 @@ async def get_dashboard():
     </body>
     </html>
     """)
+
+@app.head("/")
+async def head_root():
+    """Handles HEAD requests for health checks."""
+    return Response(status_code=200)
 
 # ==============================================================================
 # 4. APPLICATION RUNNER
