@@ -547,6 +547,6 @@ async def head_root():
 # ==============================================================================
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "8080"))
     logging.info(f"🚀 Starting server on http://0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
