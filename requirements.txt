@@ -29,3 +29,11 @@ pyarrow
 sqlalchemy
 fsspec
 flask
+
+gradio>=4.20.0
+pandas
+numpy
+networkx  
+matplotlib
+seaborn
+pillow
