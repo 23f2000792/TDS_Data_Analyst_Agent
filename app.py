@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
-    title="Data Analyst Agent (Corrected Version)",
+    title="Data Analyst Agent (Robust Version)",
     description="A robust, single-call agent using a secure sandbox for data analysis.",
 )
 
@@ -66,7 +66,6 @@ def generate_python_code(prompt: str) -> str:
     if not openai_client:
         raise HTTPException(status_code=503, detail="OpenAI client not initialized. Check API key.")
 
-    # This is the hardened system prompt that forces the AI to produce correct, robust code.
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
         "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
@@ -192,9 +191,9 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
         attachment_files[data_file.filename] = await data_file.read()
         logging.info(f"Prepared data file for sandbox: {data_file.filename}")
     else:
-        logging.info("No data file provided with the request.")
+        # This case should ideally not be hit if validation is correct
+        raise HTTPException(status_code=400, detail="Data file is missing from the request.")
 
-    # Handle web scraping if requested
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
         if url_match:
@@ -208,7 +207,6 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
             except requests.RequestException as e:
                 logging.error(f"Failed to scrape URL {url}: {e}")
 
-    # Construct the prompt for the LLM
     user_prompt = (
         f"User Question:\n---\n{question_text}\n---\n\n"
         f"Files available in the current directory: {', '.join(attachment_files.keys()) if attachment_files else 'None'}"
@@ -229,18 +227,36 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
         raise HTTPException(status_code=500, detail=f"{error_msg} Output: {result_stdout}")
 
 @app.post("/")
-async def analyze(
-    file: UploadFile = File(...),
-    question: str = Form(...)
-):
-    """Main API endpoint for data analysis, using a sandbox for code execution."""
+async def analyze(request: Request):
+    """
+    Main API endpoint for data analysis. It manually parses multipart/form-data
+    to robustly handle requests from various clients, including the evaluation script.
+    """
     try:
+        form_data = await request.form()
+        
+        question = form_data.get("question")
+        file = form_data.get("file")
+
+        if not question or not isinstance(question, str):
+            raise HTTPException(status_code=422, detail="Missing or invalid 'question' field in form data.")
+        
+        if not file or not isinstance(file, UploadFile):
+            raise HTTPException(status_code=422, detail="Missing or invalid 'file' field in form data.")
+
         return await asyncio.wait_for(
             handle_analysis_request(file, question), 
             timeout=REQUEST_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail=f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds")
+    except Exception as e:
+        logger.error(f"An error occurred in the main analyze endpoint: {e}")
+        # Re-raise HTTPException or convert other exceptions
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=400, detail=f"Failed to process request: {str(e)}")
+
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def get_dashboard():
@@ -262,7 +278,6 @@ async def get_dashboard():
       .main-card { background:#2c2c3e; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,.4); padding:30px; margin-bottom:30px; }
       .form-group { margin-bottom: 20px; }
       .form-group label { display:block; margin-bottom:8px; font-weight:600; color:#ddd; }
-      .form-group textarea { width: 100%; padding: 15px; border-radius: 8px; background: #1f1f2e; border: 2px solid #555; color: #bbb; font-family: inherit; resize: vertical; min-height: 100px; }
       .file-input-wrapper { position: relative; }
       .file-input { width:100%; padding:15px; border:2px dashed #555; border-radius:8px; background:#1f1f2e; cursor:pointer; transition:.3s ease; text-align:center; color:#bbb; }
       .file-input input[type="file"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
@@ -293,19 +308,25 @@ async def get_dashboard():
       <div class="container">
         <div class="header">
           <h1>🤖 TDS Data Analyst Agent</h1>
-          <p>Provide a question and an optional dataset to get intelligent answers with visualizations</p>
+          <p>Upload your questions and dataset to get intelligent answers with visualizations</p>
         </div>
         <div class="main-card">
           <form id="analysisForm">
             <div class="form-group">
-                <label for="question">Question <span style="color:#dc3545">*</span></label>
-                <textarea id="question" name="question" required placeholder="e.g., Analyze `sample-sales.csv`..."></textarea>
+                <label for="questions_file">Questions File (.txt) <span style="color:#dc3545">*</span></label>
+                <div class="file-input-wrapper">
+                    <div class="file-input" id="questionsDrop">
+                        <input type="file" id="questions_file" name="questions_file" accept=".txt" required/>
+                        <span>📁 Click to upload your questions (.txt)</span>
+                    </div>
+                </div>
+                <div id="questionsInfo" class="file-info"></div>
             </div>
             <div class="form-group">
-              <label for="data_file">Upload Dataset (Optional)</label>
+              <label for="data_file">Upload Dataset <span style="color:#dc3545">*</span></label>
               <div class="file-input-wrapper">
                 <div class="file-input" id="dataDrop">
-                  <input type="file" id="data_file" name="file"/>
+                  <input type="file" id="data_file" name="file" required/>
                   <span>📁 Click or drag & drop your dataset</span>
                 </div>
               </div>
@@ -334,8 +355,9 @@ async def get_dashboard():
         class DataAnalystApp {
           constructor() {
             this.form = document.getElementById('analysisForm');
+            this.qFileInput = document.getElementById('questions_file');
             this.dFileInput = document.getElementById('data_file');
-            this.questionInput = document.getElementById('question');
+            this.qInfo = document.getElementById('questionsInfo');
             this.dInfo = document.getElementById('dataInfo');
             this.submitBtn = document.getElementById('submitBtn');
             this.clearBtn = document.getElementById('clearBtn');
@@ -349,6 +371,7 @@ async def get_dashboard():
           initEventListeners() {
             this.form.addEventListener('submit', (e) => this.handleSubmit(e));
             this.clearBtn.addEventListener('click', () => this.clearForm());
+            this.qFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.qInfo, 'Questions'));
             this.dFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.dInfo, 'Dataset'));
             document.querySelector('.close').addEventListener('click', () => this.hideImageModal());
           }
@@ -364,22 +387,48 @@ async def get_dashboard():
           }
           async handleSubmit(event) {
             event.preventDefault();
-            if (!this.questionInput.value.trim()) { alert('Please enter a question.'); return; }
-            if (!this.dFileInput.files[0]) { alert('Please upload a data file.'); return; }
-            this.showLoading(true);
-            try {
-              const formData = new FormData(this.form);
-              const response = await fetch('/', { method: 'POST', body: formData }); // CORRECTED: Fetch from '/'
-              const data = await response.json();
-              if (!response.ok) {
-                throw new Error(data.detail || `HTTP ${response.status}`);
-              }
-              this.displayResults(data);
-            } catch (err) {
-              this.displayError(err.message);
-            } finally {
-              this.showLoading(false);
+            const questionFile = this.qFileInput.files[0];
+            const dataFile = this.dFileInput.files[0];
+
+            if (!questionFile) {
+                alert('Please upload a questions.txt file.');
+                return;
             }
+            if (!dataFile) {
+                alert('Please upload a data file.');
+                return;
+            }
+
+            this.showLoading(true);
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const questionText = e.target.result;
+                    const formData = new FormData();
+                    formData.append('file', dataFile);
+                    formData.append('question', questionText);
+
+                    const response = await fetch('/', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data.detail || `HTTP ${response.status}`);
+                    }
+                    this.displayResults(data);
+                } catch (err) {
+                    this.displayError(err.message);
+                } finally {
+                    this.showLoading(false);
+                }
+            };
+            reader.onerror = (e) => {
+                this.displayError('Failed to read the question file.');
+                this.showLoading(false);
+            };
+            reader.readAsText(questionFile);
           }
           displayResults(data) {
             this.resultsContent.innerHTML = '';
@@ -434,6 +483,7 @@ async def get_dashboard():
           }
           clearForm() {
             this.form.reset();
+            this.qInfo.style.display = 'none';
             this.dInfo.style.display = 'none';
             this.resultsContainer.style.display = 'none';
             this.resultsContent.innerHTML = '';
