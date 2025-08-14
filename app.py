@@ -7,7 +7,7 @@ import asyncio
 import logging
 import re
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import subprocess
 from fastapi import FastAPI, UploadFile, Request, HTTPException, File
@@ -184,37 +184,31 @@ def json_serializer_helper(obj):
 # 3. API ENDPOINTS
 # ==============================================================================
 @app.post("/api/")
-async def analyze(request: Request):
-    """Main API endpoint for data analysis."""
+async def analyze(
+    questions_file: UploadFile = File(..., alias="questions.txt"),
+    data_files: Optional[List[UploadFile]] = File(None, alias="data-files")
+):
+    """Main API endpoint for data analysis, using FastAPI's dependency injection for robust file handling."""
     try:
-        return await asyncio.wait_for(handle_analysis_request(request), timeout=REQUEST_TIMEOUT_SEC)
+        return await asyncio.wait_for(
+            handle_analysis_request(questions_file, data_files), 
+            timeout=REQUEST_TIMEOUT_SEC
+        )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail=f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds")
 
-async def handle_analysis_request(request: Request):
-    form = await request.form()
-    
-    # --- THIS IS THE CRITICAL FIX FOR FILE HANDLING ---
-    # This logic robustly finds the questions file and all other data files.
-    questions_file: UploadFile = None
-    attachment_files: Dict[str, bytes] = {}
-    
-    # The evaluation platform sends files with specific field names.
-    # We must iterate through all items to find them.
-    for key in form.keys():
-        for file in form.getlist(key):
-            if isinstance(file, UploadFile) and file.filename:
-                # The primary check is for the field name being 'questions.txt'
-                if key == 'questions_file' and not questions_file:
-                    questions_file = file
-                else:
-                    attachment_files[file.filename] = await file.read()
-
+async def handle_analysis_request(questions_file: UploadFile, data_files: Optional[List[UploadFile]]):
     if not questions_file:
         raise HTTPException(status_code=400, detail="A 'questions.txt' file is required.")
 
     question_text = (await questions_file.read()).decode('utf-8')
     
+    attachment_files: Dict[str, bytes] = {}
+    if data_files:
+        for file in data_files:
+            if file.filename:
+                attachment_files[file.filename] = await file.read()
+
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
         if url_match:
