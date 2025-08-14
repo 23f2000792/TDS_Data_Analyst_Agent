@@ -205,7 +205,7 @@ async def handle_analysis_request(request: Request):
         for file in form.getlist(key):
             if isinstance(file, UploadFile) and file.filename:
                 # The primary check is for the field name being 'questions.txt'
-                if key == 'questions.txt' and not questions_file:
+                if key == 'questions_file' and not questions_file:
                     questions_file = file
                 else:
                     attachment_files[file.filename] = await file.read()
