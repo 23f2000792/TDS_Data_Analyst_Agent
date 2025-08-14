@@ -10,13 +10,14 @@ import sys
 from typing import Dict, Any, List, Optional
 
 import subprocess
-from fastapi import FastAPI, UploadFile, Request, HTTPException, File
+from fastapi import FastAPI, UploadFile, Request, HTTPException, File, Form
 from fastapi.responses import JSONResponse, HTMLResponse
 from starlette.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from dotenv import load_dotenv
 import pandas as pd
 import requests
+import numpy as np
 
 # ==============================================================================
 # 1. CONFIGURATION & INITIALIZATION
@@ -31,10 +32,11 @@ CODE_EXEC_TIMEOUT_SEC = 340
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
-    title="Data Analyst Agent (Final Version)",
+    title="Data Analyst Agent (Corrected Version)",
     description="A robust, single-call agent using a secure sandbox for data analysis.",
 )
 
@@ -67,27 +69,24 @@ def generate_python_code(prompt: str) -> str:
     # This is the hardened system prompt that forces the AI to produce correct, robust code.
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
-        "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON array or object** that contains the final, raw answer values. "
+        "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
         "Do not include descriptive text. All other logs or debug information must be written to **standard error (stderr)**.\n\n"
         "Respond ONLY with the Python code inside a markdown block: ```python\n...code...\n```\n\n"
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
-        "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `duckdb`, `networkx`, and `matplotlib`. "
+        "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `networkx`, and `matplotlib`. "
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **File Listing (MANDATORY)**: Your script's first executable line of code after imports MUST be `print(f'Files in directory: {os.listdir()}', file=sys.stderr)`. This is essential for debugging and ensures you know the exact filenames available.\n"
-        "3.  **Data Source**: Use the file list printed to stderr to identify the correct file to load. Load files by their exact filename (e.g., `pd.read_csv('sample-sales.csv')`).\n"
-        "4.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "5.  **HTML Table Processing**: If reading data from an HTML file with `pd.read_html`, the DataFrame might have a MultiIndex. "
-        "    You **MUST** immediately check for and collapse any MultiIndex: `if isinstance(df.columns, pd.MultiIndex): df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]`\n"
-        "6.  **MANDATORY Data Cleaning**:\n"
+        "2.  **File Path**: The data file is in the current working directory. Load it directly by its filename (e.g., `pd.read_csv('sample-sales.csv')`). Do not use a path like `./` or `/tmp/`.\n"
+        "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
+        "4.  **MANDATORY Data Cleaning**:\n"
         r"    a. **Clean Column Names**: After loading data, robustly clean all column names. Ensure they are strings, then apply cleaning: `df.columns = df.columns.str.lower().str.strip().str.replace(r'\[.*?\]', '', regex=True).str.replace(r'[^\w]+', '_', regex=True)`." + "\n"
         "    b. **CRITICAL NUMERIC CLEANING**: When a column contains numbers but is read as a string (e.g., '$1,234.56'), you MUST clean it using this EXACT three-step process:\n"
         "        i. Force to string: `df['column_name'] = df['column_name'].astype(str)`\n"
         "        ii. Remove all non-digit/non-decimal characters: `df['column_name'] = df['column_name'].str.replace(r'[^\\d.]', '', regex=True)`\n"
         "        iii. Convert to numeric: `df['column_name'] = pd.to_numeric(df['column_name'], errors='coerce')`\n"
-        "7.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "5.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "8.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types (like `np.int64`) to native Python types (`int`, `float`).\n"
-        "9.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict_or_list, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "6.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types (like `np.int64`) to native Python types (`int`, `float`).\n"
+        "7.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
@@ -107,7 +106,7 @@ def generate_python_code(prompt: str) -> str:
             return llm_response
         raise ValueError("Could not extract Python code from the LLM response.")
     except Exception as e:
-        logging.error(f"OpenAI API call failed: {e}")
+        logger.error(f"OpenAI API call failed: {e}")
         raise HTTPException(status_code=503, detail=f"Error communicating with LLM provider: {e}")
 
 async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
@@ -130,6 +129,7 @@ def plot_to_base64():
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=80)
     plt.clf()
+    plt.close() # Ensure figure is closed
     buf.seek(0)
     img_bytes = buf.getvalue()
     return "data:image/png;base64," + base64.b64encode(img_bytes).decode('ascii')
@@ -162,17 +162,18 @@ def json_serializer_helper(obj):
             )
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CODE_EXEC_TIMEOUT_SEC)
             
-            stdout_decoded = stdout.decode('utf-8', errors='ignore')
-            stderr_decoded = stderr.decode('utf-8', errors='ignore')
+            stdout_decoded = stdout.decode('utf-8', errors='ignore').strip()
+            stderr_decoded = stderr.decode('utf-8', errors='ignore').strip()
             
             if stderr_decoded:
                 logging.warning(f"STDERR from script:\n{stderr_decoded}")
             
             if process.returncode != 0:
                 logging.error(f"Script execution failed with exit code {process.returncode}.")
-                raise HTTPException(status_code=500, detail=f"Script execution failed: {stderr_decoded or stdout_decoded}")
+                error_detail = stderr_decoded or stdout_decoded or "Unknown execution error."
+                raise HTTPException(status_code=500, detail=f"Script execution failed: {error_detail}")
             
-            return stdout_decoded.strip()
+            return stdout_decoded
 
         except asyncio.TimeoutError:
             process.kill()
@@ -183,32 +184,17 @@ def json_serializer_helper(obj):
 # ==============================================================================
 # 3. API ENDPOINTS
 # ==============================================================================
-@app.post("/api/")
-async def analyze(
-    questions_file: UploadFile = File(..., alias="questions.txt"),
-    data_files: Optional[List[UploadFile]] = File(None, alias="data-files")
-):
-    """Main API endpoint for data analysis, using FastAPI's dependency injection for robust file handling."""
-    try:
-        return await asyncio.wait_for(
-            handle_analysis_request(questions_file, data_files), 
-            timeout=REQUEST_TIMEOUT_SEC
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds")
 
-async def handle_analysis_request(questions_file: UploadFile, data_files: Optional[List[UploadFile]]):
-    if not questions_file:
-        raise HTTPException(status_code=400, detail="A 'questions.txt' file is required.")
-
-    question_text = (await questions_file.read()).decode('utf-8')
-    
+async def handle_analysis_request(data_file: UploadFile, question_text: str):
+    """Core logic to handle the analysis request."""
     attachment_files: Dict[str, bytes] = {}
-    if data_files:
-        for file in data_files:
-            if file.filename:
-                attachment_files[file.filename] = await file.read()
+    if data_file and data_file.filename:
+        attachment_files[data_file.filename] = await data_file.read()
+        logging.info(f"Prepared data file for sandbox: {data_file.filename}")
+    else:
+        logging.info("No data file provided with the request.")
 
+    # Handle web scraping if requested
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
         if url_match:
@@ -222,12 +208,14 @@ async def handle_analysis_request(questions_file: UploadFile, data_files: Option
             except requests.RequestException as e:
                 logging.error(f"Failed to scrape URL {url}: {e}")
 
+    # Construct the prompt for the LLM
     user_prompt = (
         f"User Question:\n---\n{question_text}\n---\n\n"
         f"Files available in the current directory: {', '.join(attachment_files.keys()) if attachment_files else 'None'}"
     )
 
     python_code = generate_python_code(user_prompt)
+    logging.info(f"Generated Python Code:\n{python_code}")
     result_stdout = await execute_code_in_sandbox(python_code, attachment_files)
 
     try:
@@ -240,9 +228,23 @@ async def handle_analysis_request(questions_file: UploadFile, data_files: Option
         logging.error(f"{error_msg} Output: {result_stdout}")
         raise HTTPException(status_code=500, detail=f"{error_msg} Output: {result_stdout}")
 
+@app.post("/")
+async def analyze(
+    file: UploadFile = File(...),
+    question: str = Form(...)
+):
+    """Main API endpoint for data analysis, using a sandbox for code execution."""
+    try:
+        return await asyncio.wait_for(
+            handle_analysis_request(file, question), 
+            timeout=REQUEST_TIMEOUT_SEC
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds")
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def get_dashboard():
-    """Serves the complete HTML dashboard from your provided index2.html."""
+    """Serves the interactive HTML dashboard."""
     return HTMLResponse(content="""
     <!DOCTYPE html>
     <html lang="en">
@@ -260,6 +262,7 @@ async def get_dashboard():
       .main-card { background:#2c2c3e; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,.4); padding:30px; margin-bottom:30px; }
       .form-group { margin-bottom: 20px; }
       .form-group label { display:block; margin-bottom:8px; font-weight:600; color:#ddd; }
+      .form-group textarea { width: 100%; padding: 15px; border-radius: 8px; background: #1f1f2e; border: 2px solid #555; color: #bbb; font-family: inherit; resize: vertical; min-height: 100px; }
       .file-input-wrapper { position: relative; }
       .file-input { width:100%; padding:15px; border:2px dashed #555; border-radius:8px; background:#1f1f2e; cursor:pointer; transition:.3s ease; text-align:center; color:#bbb; }
       .file-input input[type="file"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
@@ -270,7 +273,7 @@ async def get_dashboard():
       .btn:disabled { background:#555; cursor:not-allowed; transform:none; box-shadow:none; }
       .btn-secondary { background:#444; color:#ddd; }
       .button-group { display:flex; gap:10px; margin-top:20px; flex-wrap:wrap; }
-      .loading { display:none; text-align:center; padding:20px; }
+      .loading { display:none; text-align:center; padding:20px; flex-direction: column; justify-content: center; align-items: center;}
       .spinner { border:4px solid #444; border-top:4px solid #667eea; border-radius:50%; width:40px; height:40px; animation:spin 1s linear infinite; margin:0 auto 15px; }
       @keyframes spin { 0%{transform:rotate(0)} 100%{transform:rotate(360deg)} }
       .results { display:none; margin-top:30px; }
@@ -290,26 +293,20 @@ async def get_dashboard():
       <div class="container">
         <div class="header">
           <h1>🤖 TDS Data Analyst Agent</h1>
-          <p>Upload your questions file and optional dataset to get intelligent answers with visualizations</p>
+          <p>Provide a question and an optional dataset to get intelligent answers with visualizations</p>
         </div>
         <div class="main-card">
           <form id="analysisForm">
             <div class="form-group">
-              <label for="questions_file">Questions File (.txt) <span style="color:#dc3545">*</span></label>
-              <div class="file-input-wrapper">
-                <div class="file-input" id="questionsDrop">
-                  <input type="file" id="questions_file" name="questions.txt"/>
-                  <span>📁 Click to upload your questions (.txt)</span>
-                </div>
-              </div>
-              <div id="questionsInfo" class="file-info"></div>
+                <label for="question">Question <span style="color:#dc3545">*</span></label>
+                <textarea id="question" name="question" required placeholder="e.g., Analyze `sample-sales.csv`..."></textarea>
             </div>
             <div class="form-group">
               <label for="data_file">Upload Dataset (Optional)</label>
               <div class="file-input-wrapper">
                 <div class="file-input" id="dataDrop">
-                  <input type="file" id="data_file" name="data-files" multiple/>
-                  <span>📁 Click or drag & drop your dataset(s)</span>
+                  <input type="file" id="data_file" name="file"/>
+                  <span>📁 Click or drag & drop your dataset</span>
                 </div>
               </div>
               <div id="dataInfo" class="file-info"></div>
@@ -321,7 +318,7 @@ async def get_dashboard():
           </form>
           <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p>Analyzing your data... This may take a few moments.</p>
+            <p>Analyzing your data... This may take a moment.</p>
           </div>
           <div class="results" id="results">
             <h3>📊 Analysis Results</h3>
@@ -337,9 +334,8 @@ async def get_dashboard():
         class DataAnalystApp {
           constructor() {
             this.form = document.getElementById('analysisForm');
-            this.qFileInput = document.getElementById('questions_file');
             this.dFileInput = document.getElementById('data_file');
-            this.qInfo = document.getElementById('questionsInfo');
+            this.questionInput = document.getElementById('question');
             this.dInfo = document.getElementById('dataInfo');
             this.submitBtn = document.getElementById('submitBtn');
             this.clearBtn = document.getElementById('clearBtn');
@@ -353,8 +349,7 @@ async def get_dashboard():
           initEventListeners() {
             this.form.addEventListener('submit', (e) => this.handleSubmit(e));
             this.clearBtn.addEventListener('click', () => this.clearForm());
-            this.qFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.qInfo, 'Questions'));
-            this.dFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.dInfo, 'Dataset(s)'));
+            this.dFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.dInfo, 'Dataset'));
             document.querySelector('.close').addEventListener('click', () => this.hideImageModal());
           }
           handleFileSelect(event, infoEl, label) {
@@ -369,11 +364,12 @@ async def get_dashboard():
           }
           async handleSubmit(event) {
             event.preventDefault();
-            if (!this.qFileInput.files[0]) { alert('Please upload your questions .txt file.'); return; }
+            if (!this.questionInput.value.trim()) { alert('Please enter a question.'); return; }
+            if (!this.dFileInput.files[0]) { alert('Please upload a data file.'); return; }
             this.showLoading(true);
             try {
               const formData = new FormData(this.form);
-              const response = await fetch('/api/', { method: 'POST', body: formData });
+              const response = await fetch('/', { method: 'POST', body: formData }); // CORRECTED: Fetch from '/'
               const data = await response.json();
               if (!response.ok) {
                 throw new Error(data.detail || `HTTP ${response.status}`);
@@ -389,7 +385,7 @@ async def get_dashboard():
             this.resultsContent.innerHTML = '';
             const isError = data.error || (Array.isArray(data) && data.length === 0);
             if (isError) {
-              this.displayError(data.error || 'The agent returned an empty result.');
+              this.displayError(data.error || 'The agent returned an empty or invalid result.');
               return;
             }
             const entries = Array.isArray(data) ? data.map((item, i) => [`Answer ${i + 1}`, item]) : Object.entries(data);
@@ -410,7 +406,7 @@ async def get_dashboard():
             item.className = isError ? 'result-item error' : 'result-item';
             const keyDiv = document.createElement('div');
             keyDiv.className = 'question';
-            keyDiv.textContent = key;
+            keyDiv.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
             const valueDiv = document.createElement('div');
             valueDiv.className = 'answer';
             const maybeImg = (typeof value === 'string' && value.startsWith('data:image/')) ? value : null;
@@ -438,7 +434,6 @@ async def get_dashboard():
           }
           clearForm() {
             this.form.reset();
-            this.qInfo.style.display = 'none';
             this.dInfo.style.display = 'none';
             this.resultsContainer.style.display = 'none';
             this.resultsContent.innerHTML = '';
