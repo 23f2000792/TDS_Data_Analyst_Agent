@@ -80,10 +80,11 @@ def generate_python_code(prompt: str) -> str:
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
         "2.  **File Path**: The data file is in the current working directory. Load it directly by its filename (e.g., `pd.read_csv('sample-sales.csv')`).\n"
         "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "4.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "4.  **Date Conversion**: If a column contains dates (e.g., '2024-01-15', '1/15/2024'), you MUST convert it to datetime objects before performing any date-related operations: `df['date_column'] = pd.to_datetime(df['date_column'], errors='coerce')`.\n"
+        "5.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "5.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
-        "6.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "6.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
+        "7.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
