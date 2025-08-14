@@ -64,7 +64,7 @@ def generate_python_code(prompt: str) -> str:
     if not openai_client:
         raise HTTPException(status_code=503, detail="OpenAI client not initialized. Check API key.")
 
-    # This is the final, hardened system prompt with explicit data cleaning and debugging instructions.
+    # This is the hardened system prompt that forces the AI to produce correct, robust code.
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
         "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON array or object** that contains the final, raw answer values. "
@@ -76,7 +76,7 @@ def generate_python_code(prompt: str) -> str:
         "2.  **File Listing (MANDATORY)**: Your script's first executable line of code after imports MUST be `print(f'Files in directory: {os.listdir()}', file=sys.stderr)`. This is essential for debugging and ensures you know the exact filenames available.\n"
         "3.  **Data Source**: Use the file list printed to stderr to identify the correct file to load. Load files by their exact filename (e.g., `pd.read_csv('sample-sales.csv')`).\n"
         "4.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "5.  **HTML Table Processing**: If reading from an HTML file with `pd.read_html`, the DataFrame might have a MultiIndex. "
+        "5.  **HTML Table Processing**: If reading data from an HTML file with `pd.read_html`, the DataFrame might have a MultiIndex. "
         "    You **MUST** immediately check for and collapse any MultiIndex: `if isinstance(df.columns, pd.MultiIndex): df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]`\n"
         "6.  **MANDATORY Data Cleaning**:\n"
         r"    a. **Clean Column Names**: After loading data, robustly clean all column names. Ensure they are strings, then apply cleaning: `df.columns = df.columns.str.lower().str.strip().str.replace(r'\[.*?\]', '', regex=True).str.replace(r'[^\\w]+', '_', regex=True)`." + "\n"
@@ -100,7 +100,7 @@ def generate_python_code(prompt: str) -> str:
             temperature=0.0,
         )
         llm_response = resp.choices[0].message.content
-        match = re.search(r"```python\n(.*?)\n```", ll_response, re.DOTALL)
+        match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
         if match:
             return match.group(1).strip()
         if "import pandas" in llm_response:
@@ -373,7 +373,7 @@ async def get_dashboard():
               formData.append('questions.txt', this.qFileInput.files[0]);
               // The evaluation may send multiple files under the same field name
               Array.from(this.dFileInput.files).forEach(file => {
-                  formData.append('data-files', file); 
+                  formData.append(file.name, file); 
               });
               const response = await fetch('/api/', { method: 'POST', body: formData });
               const data = await response.json();
