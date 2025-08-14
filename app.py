@@ -26,7 +26,7 @@ load_dotenv()
 
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
 REQUEST_TIMEOUT_SEC = 350
 CODE_EXEC_TIMEOUT_SEC = 340
 
