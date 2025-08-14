@@ -11,7 +11,7 @@ import time
 from typing import Dict, Any, List, Optional
 
 import subprocess
-from fastapi import FastAPI, UploadFile, Request, HTTPException, File, Form
+from fastapi import FastAPI, UploadFile, Request, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 from openai import OpenAI
@@ -27,11 +27,10 @@ load_dotenv()
 
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# Using a faster model to prevent server timeouts on platforms like Render.
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-REQUEST_TIMEOUT_SEC = 170 # 3 minutes minus a buffer
+REQUEST_TIMEOUT_SEC = 170
 CODE_EXEC_TIMEOUT_SEC = 160
-OPENAI_CLIENT_TIMEOUT_SEC = 60 # Fail fast if OpenAI is slow
+OPENAI_CLIENT_TIMEOUT_SEC = 60
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -57,7 +56,6 @@ if not OPENAI_API_KEY:
     logging.warning("⚠️ OPENAI_API_KEY is not set. The application will not function.")
     openai_client = None
 else:
-    # Configure client with a specific timeout
     openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_CLIENT_TIMEOUT_SEC)
     logging.info(f"✅ OpenAI client initialized for model {OPENAI_MODEL}.")
 
@@ -104,7 +102,7 @@ def generate_python_code(prompt: str) -> str:
         match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
         if match:
             return match.group(1).strip()
-        if "import pandas" in llm_response: # Fallback for when markdown is missing
+        if "import pandas" in llm_response:
             return llm_response
         raise ValueError("Could not extract Python code from the LLM response.")
     except Exception as e:
@@ -115,18 +113,15 @@ async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
     """Executes a Python script in a temporary directory with provided files using asyncio."""
     with tempfile.TemporaryDirectory() as temp_dir:
         
-        # Determine the primary data file to load (if any)
         primary_file = None
         if files:
-            # Find the first non-HTML file to treat as the main dataset
             for filename in files:
                 if not filename.lower().endswith('.html'):
                     primary_file = filename
                     break
-            if not primary_file and files: # Fallback if only an HTML file exists
+            if not primary_file and files:
                 primary_file = list(files.keys())[0]
 
-        # Write all files to the sandbox
         for filename, content in files.items():
             with open(os.path.join(temp_dir, filename), "wb") as f:
                 f.write(content)
@@ -134,7 +129,7 @@ async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
         helper_code = r'''
 import base64, io, json, os, sys, re
 import matplotlib, numpy as np, pandas as pd
-matplotlib.use('Agg') # Set non-interactive backend
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 def plot_to_base64():
@@ -156,24 +151,16 @@ def json_serializer_helper(obj):
     except Exception: return f"Unserializable type: {obj.__class__.__name__}"
 
 def robust_data_loader(file_path):
-    """Loads data from various file types into a pandas DataFrame."""
-    if not os.path.exists(file_path):
-        return pd.DataFrame()
-    
+    if not os.path.exists(file_path): return pd.DataFrame()
     file_ext = os.path.splitext(file_path)[1].lower()
-    
     try:
-        if file_ext == '.csv':
-            return pd.read_csv(file_path)
-        elif file_ext in ['.xls', '.xlsx']:
-            return pd.read_excel(file_path)
-        elif file_ext == '.json':
-            return pd.read_json(file_path, lines=True)
+        if file_ext == '.csv': return pd.read_csv(file_path)
+        elif file_ext in ['.xls', '.xlsx']: return pd.read_excel(file_path)
+        elif file_ext == '.json': return pd.read_json(file_path, lines=True)
         elif file_ext == '.html':
             tables = pd.read_html(file_path)
             return tables[0] if tables else pd.DataFrame()
-        elif file_ext == '.parquet':
-            return pd.read_parquet(file_path)
+        elif file_ext == '.parquet': return pd.read_parquet(file_path)
         else:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return pd.DataFrame([line.strip() for line in f.readlines()], columns=['text'])
@@ -182,50 +169,33 @@ def robust_data_loader(file_path):
         return pd.DataFrame()
 
 def clean_dataframe(df):
-    """Applies a series of robust cleaning operations to a DataFrame."""
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return df
-
-    # 1. Clean column names
+    if not isinstance(df, pd.DataFrame) or df.empty: return df
     df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
-
-    # 2. Intelligently convert types
     for col in df.columns:
         if df[col].dtype == 'object':
             series = df[col].dropna()
-            if series.empty:
-                continue
-            
-            # Attempt datetime conversion
+            if series.empty: continue
             try:
                 df[col] = pd.to_datetime(series, errors='raise')
                 continue
-            except (ValueError, TypeError):
-                pass
-            
-            # Attempt numeric conversion, handling suffixes like 'billion', 'million'
+            except (ValueError, TypeError): pass
             try:
                 numeric_series = series.astype(str).str.lower()
                 multiplier = 1
-                if numeric_series.str.contains('billion').any():
-                    multiplier = 1_000_000_000
-                elif numeric_series.str.contains('million').any():
-                    multiplier = 1_000_000
-                
-                numeric_col = numeric_series.str.replace(r'[^\d.]', '', regex=True)
+                if numeric_series.str.contains('billion').any(): multiplier = 1_000_000_000
+                elif numeric_series.str.contains('million').any(): multiplier = 1_000_000
+                numeric_col = numeric_series.str.replace(r'[^\d.-]', '', regex=True)
                 if numeric_col.str.strip().str.len().any():
                     df[col] = pd.to_numeric(numeric_col, errors='coerce') * multiplier
-            except Exception:
-                pass
+            except Exception: pass
     return df
 
 # --- Main Sandbox Execution ---
-df = pd.DataFrame() # Initialize empty DataFrame
+df = pd.DataFrame()
 primary_file_path = f"''' + (primary_file if primary_file else '') + '''"
 if primary_file_path:
     df = robust_data_loader(primary_file_path)
     df = clean_dataframe(df)
-
 '''
         full_script = helper_code + "\n\n" + script
         script_path = os.path.join(temp_dir, "main.py")
@@ -316,7 +286,6 @@ async def analyze(request: Request):
         form_data = await request.form()
         logger.info(f"Received form data with keys: {list(form_data.keys())}")
         
-        # The question file is always expected.
         question_file = form_data.get("questions.txt")
         if not question_file or not hasattr(question_file, 'filename'):
              raise HTTPException(status_code=422, detail="Missing 'questions.txt' file in form data.")
@@ -324,7 +293,6 @@ async def analyze(request: Request):
         question_text = (await question_file.read()).decode('utf-8')
         logger.info("Successfully read 'questions.txt'.")
         
-        # All other files are treated as data files (optional)
         data_files = [value for key, value in form_data.items() if hasattr(value, 'filename') and key != "questions.txt"]
 
         return await asyncio.wait_for(
@@ -332,7 +300,6 @@ async def analyze(request: Request):
             timeout=REQUEST_TIMEOUT_SEC
         )
     except HTTPException as e:
-        # Re-raise HTTPExceptions to let FastAPI handle them correctly
         raise e
     except asyncio.TimeoutError:
         logger.error(f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds.")
@@ -580,6 +547,6 @@ async def head_root():
 # ==============================================================================
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "8000"))
     logging.info(f"🚀 Starting server on http://0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
