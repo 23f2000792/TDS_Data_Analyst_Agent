@@ -7,7 +7,7 @@ import asyncio
 import logging
 import re
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import subprocess
 from fastapi import FastAPI, UploadFile, Request, HTTPException
@@ -64,7 +64,7 @@ def generate_python_code(prompt: str) -> str:
     if not openai_client:
         raise HTTPException(status_code=503, detail="OpenAI client not initialized. Check API key.")
 
-    # This is the hardened system prompt that forces the AI to produce correct, robust code.
+    # This is the final, hardened system prompt with explicit data cleaning and debugging instructions.
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
         "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON array or object** that contains the final, raw answer values. "
@@ -200,11 +200,16 @@ async def handle_analysis_request(request: Request):
 
     question_text = (await questions_file.read()).decode('utf-8')
     
-    attachment_files = {
-        item.filename: await item.read() for item in form.values()
-        if isinstance(item, UploadFile) and item.filename and item is not questions_file
-    }
-    
+    # --- THIS IS THE CRITICAL FIX FOR FILE HANDLING ---
+    # The evaluation sends multiple files under keys like 'data-files'.
+    # This code now correctly iterates through all form items to find all uploaded files.
+    attachment_files: Dict[str, bytes] = {}
+    for key in form.keys():
+        if key != "questions.txt":
+            for file in form.getlist(key):
+                if isinstance(file, UploadFile) and file.filename:
+                    attachment_files[file.filename] = await file.read()
+
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
         if url_match:
@@ -304,7 +309,7 @@ async def get_dashboard():
               <label for="data_file">Upload Dataset (Optional)</label>
               <div class="file-input-wrapper">
                 <div class="file-input" id="dataDrop">
-                  <input type="file" id="data_file" name="data_file" multiple/>
+                  <input type="file" id="data_file" name="data-files" multiple/>
                   <span>📁 Click or drag & drop your dataset(s)</span>
                 </div>
               </div>
@@ -368,13 +373,7 @@ async def get_dashboard():
             if (!this.qFileInput.files[0]) { alert('Please upload your questions .txt file.'); return; }
             this.showLoading(true);
             try {
-              const formData = new FormData();
-              // The evaluation expects the field name to be 'questions.txt'
-              formData.append('questions.txt', this.qFileInput.files[0]);
-              // The evaluation may send multiple files under the same field name
-              Array.from(this.dFileInput.files).forEach(file => {
-                  formData.append(file.name, file); 
-              });
+              const formData = new FormData(this.form);
               const response = await fetch('/api/', { method: 'POST', body: formData });
               const data = await response.json();
               if (!response.ok) {
