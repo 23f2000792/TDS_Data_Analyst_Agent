@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import sys
+import time
 from typing import Dict, Any, List, Optional
 
 import subprocess
@@ -26,10 +27,11 @@ load_dotenv()
 
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# CRITICAL CHANGE: Switched to a faster model to prevent server timeouts.
+# Using a faster model to prevent server timeouts on platforms like Render.
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
 REQUEST_TIMEOUT_SEC = 350
 CODE_EXEC_TIMEOUT_SEC = 340
+OPENAI_CLIENT_TIMEOUT_SEC = 60 # Fail fast if OpenAI is slow
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,8 +57,9 @@ if not OPENAI_API_KEY:
     logging.warning("⚠️ OPENAI_API_KEY is not set. The application will not function.")
     openai_client = None
 else:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    logging.info("✅ OpenAI client initialized.")
+    # Configure client with a specific timeout
+    openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_CLIENT_TIMEOUT_SEC)
+    logging.info(f"✅ OpenAI client initialized for model {OPENAI_MODEL}.")
 
 # ==============================================================================
 # 2. CORE LOGIC: CODE GENERATION & EXECUTION
@@ -69,27 +72,23 @@ def generate_python_code(prompt: str) -> str:
 
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
-        "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
+        "The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
         "Do not include descriptive text. All other logs or debug information must be written to **standard error (stderr)**.\n\n"
         "Respond ONLY with the Python code inside a markdown block: ```python\n...code...\n```\n\n"
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
         "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `networkx`, and `matplotlib`. "
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **File Path**: The data file is in the current working directory. Load it directly by its filename (e.g., `pd.read_csv('sample-sales.csv')`). Do not use a path like `./` or `/tmp/`.\n"
+        "2.  **File Path**: The data file is in the current working directory. Load it directly by its filename (e.g., `pd.read_csv('sample-sales.csv')`).\n"
         "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "4.  **MANDATORY Data Cleaning**:\n"
-        r"    a. **Clean Column Names**: After loading data, robustly clean all column names. Ensure they are strings, then apply cleaning: `df.columns = df.columns.str.lower().str.strip().str.replace(r'\[.*?\]', '', regex=True).str.replace(r'[^\w]+', '_', regex=True)`." + "\n"
-        "    b. **CRITICAL NUMERIC CLEANING**: When a column contains numbers but is read as a string (e.g., '$1,234.56'), you MUST clean it using this EXACT three-step process:\n"
-        "        i. Force to string: `df['column_name'] = df['column_name'].astype(str)`\n"
-        "        ii. Remove all non-digit/non-decimal characters: `df['column_name'] = df['column_name'].str.replace(r'[^\\d.]', '', regex=True)`\n"
-        "        iii. Convert to numeric: `df['column_name'] = pd.to_numeric(df['column_name'], errors='coerce')`\n"
-        "5.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "4.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "6.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types (like `np.int64`) to native Python types (`int`, `float`).\n"
-        "7.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "5.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
+        "6.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
+        start_time = time.time()
+        logger.info("Initiating OpenAI API call...")
         resp = openai_client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
@@ -98,11 +97,14 @@ def generate_python_code(prompt: str) -> str:
             ],
             temperature=0.0,
         )
+        duration = time.time() - start_time
+        logger.info(f"OpenAI API call completed in {duration:.2f} seconds.")
+        
         llm_response = resp.choices[0].message.content
         match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
         if match:
             return match.group(1).strip()
-        if "import pandas" in llm_response:
+        if "import pandas" in llm_response: # Fallback for when markdown is missing
             return llm_response
         raise ValueError("Could not extract Python code from the LLM response.")
     except Exception as e:
@@ -118,45 +120,28 @@ async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
                     f.write(content)
 
         helper_code = r'''
-import base64
-from io import BytesIO
+import base64, io, json, os, sys
+import matplotlib, numpy as np, pandas as pd
+matplotlib.use('Agg') # Set non-interactive backend
 import matplotlib.pyplot as plt
-import numpy as np
-import json
-import pandas as pd
-import sys
-import os
-
-# Set backend for matplotlib
-import matplotlib
-matplotlib.use('Agg')
 
 def plot_to_base64():
-    buf = BytesIO()
+    buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=80)
-    plt.clf()
-    plt.close() # Ensure figure is closed
+    plt.clf(); plt.close()
     buf.seek(0)
     img_bytes = buf.getvalue()
-    # Ensure the image is not excessively large
     if len(img_bytes) > 100 * 1024:
         print("Warning: Generated image is > 100kB", file=sys.stderr)
     return "data:image/png;base64," + base64.b64encode(img_bytes).decode('ascii')
 
 def json_serializer_helper(obj):
-    if isinstance(obj, (np.integer, np.int64)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, pd.Timestamp):
-        return obj.isoformat()
-    try:
-        return str(obj)
-    except Exception:
-        # Fallback for unserializable types
-        return f"Unserializable type: {obj.__class__.__name__}"
+    if isinstance(obj, (np.integer, np.int64)): return int(obj)
+    if isinstance(obj, (np.floating, np.float64)): return float(obj)
+    if isinstance(obj, np.ndarray): return obj.tolist()
+    if isinstance(obj, pd.Timestamp): return obj.isoformat()
+    try: return str(obj)
+    except Exception: return f"Unserializable type: {obj.__class__.__name__}"
 '''
         full_script = helper_code + "\n\n" + script
         script_path = os.path.join(temp_dir, "main.py")
@@ -204,19 +189,6 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
     else:
         raise HTTPException(status_code=400, detail="Data file is missing from the request.")
 
-    if "scrape" in question_text.lower() or "from the url" in question_text.lower():
-        url_match = re.search(r"https?://\S+", question_text)
-        if url_match:
-            url = url_match.group(0).rstrip('.,)!?]>')
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers, timeout=15)
-                response.raise_for_status()
-                attachment_files["scraped_page.html"] = response.content
-                logging.info(f"Successfully scraped content from {url}")
-            except requests.RequestException as e:
-                logging.error(f"Failed to scrape URL {url}: {e}")
-
     user_prompt = (
         f"User Question:\n---\n{question_text}\n---\n\n"
         f"Files available in the current directory: {', '.join(attachment_files.keys()) if attachment_files else 'None'}"
@@ -247,10 +219,8 @@ async def analyze(request: Request):
         form_data = await request.form()
         logger.info(f"Received form data with keys: {list(form_data.keys())}")
         
-        # FLEXIBLE INPUT: Check for 'question' first, then fall back to 'prompt'
         question_text = form_data.get("question") or form_data.get("prompt")
         
-        # ROBUST FILE FINDING: Find the first uploaded file, regardless of its form field name
         data_file = None
         for key, value in form_data.items():
             if isinstance(value, UploadFile):
@@ -268,13 +238,21 @@ async def analyze(request: Request):
             handle_analysis_request(data_file, question_text), 
             timeout=REQUEST_TIMEOUT_SEC
         )
+    except HTTPException as e:
+        # Re-raise HTTPExceptions to let FastAPI handle them correctly
+        raise e
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds")
+        logger.error(f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds.")
+        return JSONResponse(
+            status_code=504,
+            content={"detail": f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds"}
+        )
     except Exception as e:
-        logger.error(f"An error occurred in the main analyze endpoint: {e}")
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=400, detail=f"Failed to process request: {str(e)}")
+        logger.error(f"An unexpected error occurred in the main analyze endpoint: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"An unexpected server error occurred: {str(e)}"}
+        )
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -432,11 +410,22 @@ async def get_dashboard():
                         method: 'POST',
                         body: formData
                     });
-                    const data = await response.json();
+                    
                     if (!response.ok) {
-                        throw new Error(data.detail || `HTTP ${response.status}`);
+                        // Try to parse error JSON, but fall back to status text
+                        let errorDetail = `HTTP Error: ${response.status} ${response.statusText}`;
+                        try {
+                            const errorJson = await response.json();
+                            errorDetail = errorJson.detail || JSON.stringify(errorJson);
+                        } catch (jsonError) {
+                            // The error response was not JSON, do nothing
+                        }
+                        throw new Error(errorDetail);
                     }
+
+                    const data = await response.json();
                     this.displayResults(data);
+
                 } catch (err) {
                     this.displayError(err.message);
                 } finally {
@@ -474,7 +463,6 @@ async def get_dashboard():
             item.className = isError ? 'result-item error' : 'result-item';
             const keyDiv = document.createElement('div');
             keyDiv.className = 'question';
-            // Correctly escape backslashes for regex in JS within a Python string
             keyDiv.textContent = key.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
             const valueDiv = document.createElement('div');
             valueDiv.className = 'answer';
