@@ -235,8 +235,9 @@ async def analyze(request: Request):
         
         # The question file is always expected.
         question_file = form_data.get("questions.txt")
-        if not question_file or not isinstance(question_file, UploadFile):
-             raise HTTPException(status_code=422, detail="Missing 'questions.txt' file in form data.")
+        # FLEXIBLE CHECK: Check if the object has a 'filename' attribute to identify it as a file upload.
+        if not question_file or not hasattr(question_file, 'filename'):
+             raise HTTPException(status_code=422, detail="Missing or invalid 'questions.txt' file in form data.")
         
         question_text = (await question_file.read()).decode('utf-8')
         logger.info("Successfully read 'questions.txt'.")
@@ -244,7 +245,7 @@ async def analyze(request: Request):
         # Data files are optional. Find the first one that isn't questions.txt
         data_file = None
         for key, value in form_data.items():
-            if isinstance(value, UploadFile) and key != "questions.txt":
+            if hasattr(value, 'filename') and key != "questions.txt":
                 data_file = value
                 logger.info(f"Found optional data file '{data_file.filename}' under form key '{key}'")
                 break
