@@ -7,10 +7,10 @@ import asyncio
 import logging
 import re
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import subprocess
-from fastapi import FastAPI, UploadFile, Request, HTTPException
+from fastapi import FastAPI, UploadFile, Request, HTTPException, File
 from fastapi.responses import JSONResponse, HTMLResponse
 from starlette.middleware.cors import CORSMiddleware
 from openai import OpenAI
@@ -26,8 +26,8 @@ load_dotenv()
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-REQUEST_TIMEOUT_SEC = 350  # Total time for the entire API request to complete
-CODE_EXEC_TIMEOUT_SEC = 340  # Max time for the generated Python script to run
+REQUEST_TIMEOUT_SEC = 350
+CODE_EXEC_TIMEOUT_SEC = 340
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -194,18 +194,24 @@ async def analyze(request: Request):
 async def handle_analysis_request(request: Request):
     form = await request.form()
     
-    questions_file = form.get("questions.txt") or next((v for v in form.values() if isinstance(v, UploadFile) and v.filename and v.filename.lower().endswith('.txt')), None)
+    # --- THIS IS THE CRITICAL FIX FOR FILE HANDLING ---
+    # This logic robustly finds the questions file and all other data files.
+    questions_file: UploadFile = None
+    attachment_files: Dict[str, bytes] = {}
+    
+    for key in form.keys():
+        for file in form.getlist(key):
+            if isinstance(file, UploadFile) and file.filename:
+                if 'questions.txt' in file.filename.lower() and not questions_file:
+                    questions_file = file
+                else:
+                    attachment_files[file.filename] = await file.read()
+
     if not questions_file:
-        raise HTTPException(status_code=400, detail="Exactly one .txt questions file is required.")
+        raise HTTPException(status_code=400, detail="A 'questions.txt' file is required.")
 
     question_text = (await questions_file.read()).decode('utf-8')
     
-    # --- THIS IS THE CRITICAL FIX FOR FILE HANDLING ---
-    attachment_files: Dict[str, bytes] = {}
-    for item in form.values():
-        if isinstance(item, UploadFile) and item.filename and item is not questions_file:
-            attachment_files[item.filename] = await item.read()
-
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
         if url_match:
