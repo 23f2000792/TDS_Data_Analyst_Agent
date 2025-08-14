@@ -226,15 +226,11 @@ async def handle_analysis_request(data_file: UploadFile, question_text: str):
     result_stdout = await execute_code_in_sandbox(python_code, attachment_files)
 
     try:
-        # It's possible the output is just a string, so we try to load it as JSON
-        # but if it fails, we return it as is.
         final_json_output = json.loads(result_stdout)
         if isinstance(final_json_output, dict) and 'error' in final_json_output:
             raise HTTPException(status_code=422, detail=final_json_output['error'])
         return JSONResponse(content=final_json_output)
     except json.JSONDecodeError:
-        # If the output is not JSON, it might be a raw string from the script.
-        # This can happen with simple questions. We'll wrap it in a JSON structure.
         logging.warning(f"Script produced non-JSON output. Wrapping it. Output: {result_stdout}")
         return JSONResponse(content={"result": result_stdout})
 
@@ -247,16 +243,24 @@ async def analyze(request: Request):
     """
     try:
         form_data = await request.form()
+        logger.info(f"Received form data with keys: {list(form_data.keys())}")
         
         # FLEXIBLE INPUT: Check for 'question' first, then fall back to 'prompt'
         question_text = form_data.get("question") or form_data.get("prompt")
-        data_file = form_data.get("file")
+        
+        # ROBUST FILE FINDING: Find the first uploaded file, regardless of its form field name
+        data_file = None
+        for key, value in form_data.items():
+            if isinstance(value, UploadFile):
+                data_file = value
+                logger.info(f"Found uploaded file '{data_file.filename}' under form key '{key}'")
+                break
 
         if not question_text or not isinstance(question_text, str):
-            raise HTTPException(status_code=422, detail="Missing or invalid 'question' or 'prompt' field in form data.")
+            raise HTTPException(status_code=422, detail="Could not find a 'question' or 'prompt' field in the form data.")
         
-        if not data_file or not isinstance(data_file, UploadFile):
-            raise HTTPException(status_code=422, detail="Missing or invalid 'file' field in form data.")
+        if not data_file:
+            raise HTTPException(status_code=422, detail="No file upload found in the form data.")
 
         return await asyncio.wait_for(
             handle_analysis_request(data_file, question_text), 
@@ -468,7 +472,8 @@ async def get_dashboard():
             item.className = isError ? 'result-item error' : 'result-item';
             const keyDiv = document.createElement('div');
             keyDiv.className = 'question';
-            keyDiv.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            // Correctly escape backslashes for regex in JS within a Python string
+            keyDiv.textContent = key.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
             const valueDiv = document.createElement('div');
             valueDiv.className = 'answer';
             const maybeImg = (typeof value === 'string' && value.startsWith('data:image/')) ? value : null;
