@@ -81,11 +81,12 @@ def generate_python_code(prompt: str) -> str:
         "2.  **Data Loading**: Load the data file (e.g., `pd.read_csv('sample-sales.csv')`) into a DataFrame named `df`.\n"
         "3.  **MANDATORY Column Cleaning**: Immediately after loading the data, you **MUST** clean the column names to prevent errors from spaces or special characters. Use this exact code: `df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace(r'[^a-zA-Z0-9_]', '', regex=True)`.\n"
         "4.  **Date Conversion**: If a column contains dates (e.g., '2024-01-15', '1/15/2024'), you MUST convert it to datetime objects *after* cleaning the column names: `df['cleaned_date_column'] = pd.to_datetime(df['cleaned_date_column'], errors='coerce')`.\n"
-        "5.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "6.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "5.  **Numeric Conversion**: If a column contains numeric data stored as strings (e.g., '$1,234.56'), you MUST convert it to a number. Use this exact code: `df['column_name'] = pd.to_numeric(df['column_name'].astype(str).str.replace(r'[^\\d.]', '', regex=True), errors='coerce')`.\n"
+        "6.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
+        "7.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "7.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
-        "8.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "8.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
+        "9.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
