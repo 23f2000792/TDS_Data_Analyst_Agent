@@ -7,7 +7,7 @@ import asyncio
 import logging
 import re
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import subprocess
 from fastapi import FastAPI, UploadFile, Request, HTTPException
@@ -26,8 +26,8 @@ load_dotenv()
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-REQUEST_TIMEOUT_SEC = 350
-CODE_EXEC_TIMEOUT_SEC = 340
+REQUEST_TIMEOUT_SEC = 350  # Total time for the entire API request to complete
+CODE_EXEC_TIMEOUT_SEC = 340  # Max time for the generated Python script to run
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -64,7 +64,7 @@ def generate_python_code(prompt: str) -> str:
     if not openai_client:
         raise HTTPException(status_code=503, detail="OpenAI client not initialized. Check API key.")
 
-    # This is the final, hardened system prompt with explicit data cleaning and debugging instructions.
+    # This is the hardened system prompt that forces the AI to produce correct, robust code.
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
         "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON array or object** that contains the final, raw answer values. "
@@ -79,7 +79,7 @@ def generate_python_code(prompt: str) -> str:
         "5.  **HTML Table Processing**: If reading data from an HTML file with `pd.read_html`, the DataFrame might have a MultiIndex. "
         "    You **MUST** immediately check for and collapse any MultiIndex: `if isinstance(df.columns, pd.MultiIndex): df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]`\n"
         "6.  **MANDATORY Data Cleaning**:\n"
-        r"    a. **Clean Column Names**: After loading data, robustly clean all column names. Ensure they are strings, then apply cleaning: `df.columns = df.columns.str.lower().str.strip().str.replace(r'\[.*?\]', '', regex=True).str.replace(r'[^\\w]+', '_', regex=True)`." + "\n"
+        r"    a. **Clean Column Names**: After loading data, robustly clean all column names. Ensure they are strings, then apply cleaning: `df.columns = df.columns.str.lower().str.strip().str.replace(r'\[.*?\]', '', regex=True).str.replace(r'[^\w]+', '_', regex=True)`." + "\n"
         "    b. **CRITICAL NUMERIC CLEANING**: When a column contains numbers but is read as a string (e.g., '$1,234.56'), you MUST clean it using this EXACT three-step process:\n"
         "        i. Force to string: `df['column_name'] = df['column_name'].astype(str)`\n"
         "        ii. Remove all non-digit/non-decimal characters: `df['column_name'] = df['column_name'].str.replace(r'[^\\d.]', '', regex=True)`\n"
@@ -201,14 +201,10 @@ async def handle_analysis_request(request: Request):
     question_text = (await questions_file.read()).decode('utf-8')
     
     # --- THIS IS THE CRITICAL FIX FOR FILE HANDLING ---
-    # The evaluation sends multiple files under keys like 'data-files'.
-    # This code now correctly iterates through all form items to find all uploaded files.
     attachment_files: Dict[str, bytes] = {}
-    for key in form.keys():
-        if key != "questions.txt":
-            for file in form.getlist(key):
-                if isinstance(file, UploadFile) and file.filename:
-                    attachment_files[file.filename] = await file.read()
+    for item in form.values():
+        if isinstance(item, UploadFile) and item.filename and item is not questions_file:
+            attachment_files[item.filename] = await item.read()
 
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
