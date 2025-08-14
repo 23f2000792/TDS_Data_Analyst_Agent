@@ -78,15 +78,12 @@ def generate_python_code(prompt: str) -> str:
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
         "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `networkx`, and `matplotlib`. "
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **Data Loading**: Load the data file (e.g., `pd.read_csv('sample-sales.csv')`) into a DataFrame named `df`.\n"
-        "3.  **MANDATORY Column Cleaning**: Immediately after loading the data, you **MUST** clean the column names to prevent errors from spaces or special characters. Use this exact code: `df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace(r'[^a-zA-Z0-9_]', '', regex=True)`.\n"
-        "4.  **Date Conversion**: If a column contains dates (e.g., '2024-01-15', '1/15/2024'), you MUST convert it to datetime objects *after* cleaning the column names: `df['cleaned_date_column'] = pd.to_datetime(df['cleaned_date_column'], errors='coerce')`.\n"
-        "5.  **Numeric Conversion**: If a column contains numeric data stored as strings (e.g., '$1,234.56'), you MUST convert it to a number. Use this exact code: `df['column_name'] = pd.to_numeric(df['column_name'].astype(str).str.replace(r'[^\\d.]', '', regex=True), errors='coerce')`.\n"
-        "6.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "7.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "2.  **Data Access**: You will be provided with a pre-cleaned pandas DataFrame named `df`. **DO NOT load any files or perform any data cleaning yourself.** The DataFrame is ready for immediate analysis.\n"
+        "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
+        "4.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "8.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
-        "9.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "5.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
+        "6.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
@@ -117,13 +114,25 @@ def generate_python_code(prompt: str) -> str:
 async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
     """Executes a Python script in a temporary directory with provided files using asyncio."""
     with tempfile.TemporaryDirectory() as temp_dir:
+        
+        # Determine the primary data file to load (if any)
+        primary_file = None
+        if files:
+            # Find the first non-HTML file to treat as the main dataset
+            for filename in files:
+                if not filename.lower().endswith('.html'):
+                    primary_file = filename
+                    break
+            if not primary_file: # Fallback if only an HTML file exists
+                primary_file = list(files.keys())[0]
+
+        # Write all files to the sandbox
         for filename, content in files.items():
-            if filename:
-                with open(os.path.join(temp_dir, filename), "wb") as f:
-                    f.write(content)
+            with open(os.path.join(temp_dir, filename), "wb") as f:
+                f.write(content)
 
         helper_code = r'''
-import base64, io, json, os, sys
+import base64, io, json, os, sys, re
 import matplotlib, numpy as np, pandas as pd
 matplotlib.use('Agg') # Set non-interactive backend
 import matplotlib.pyplot as plt
@@ -145,6 +154,71 @@ def json_serializer_helper(obj):
     if isinstance(obj, pd.Timestamp): return obj.isoformat()
     try: return str(obj)
     except Exception: return f"Unserializable type: {obj.__class__.__name__}"
+
+def robust_data_loader(file_path):
+    """Loads data from various file types into a pandas DataFrame."""
+    if not os.path.exists(file_path):
+        return pd.DataFrame()
+    
+    file_ext = os.path.splitext(file_path)[1].lower()
+    
+    try:
+        if file_ext == '.csv':
+            return pd.read_csv(file_path)
+        elif file_ext in ['.xls', '.xlsx']:
+            return pd.read_excel(file_path)
+        elif file_ext == '.json':
+            return pd.read_json(file_path, lines=True)
+        elif file_ext == '.html':
+            tables = pd.read_html(file_path)
+            return tables[0] if tables else pd.DataFrame()
+        elif file_ext == '.parquet':
+            return pd.read_parquet(file_path)
+        else:
+            # Fallback for plain text files
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return pd.DataFrame([line.strip() for line in f.readlines()], columns=['text'])
+    except Exception as e:
+        print(f"Error loading data: {e}", file=sys.stderr)
+        return pd.DataFrame()
+
+def clean_dataframe(df):
+    """Applies a series of robust cleaning operations to a DataFrame."""
+    if not isinstance(df, pd.DataFrame):
+        return df
+
+    # 1. Clean column names
+    df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
+
+    # 2. Intelligently convert types
+    for col in df.columns:
+        # Attempt numeric conversion for object columns
+        if df[col].dtype == 'object':
+            # Try converting to datetime
+            try:
+                df[col] = pd.to_datetime(df[col], errors='raise')
+                continue # Skip to next column if successful
+            except (ValueError, TypeError):
+                pass
+            
+            # Try converting to numeric
+            try:
+                # Handle strings with currency symbols, commas, etc.
+                numeric_col = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+                # Check if there's anything left to convert
+                if numeric_col.str.strip().str.len().any():
+                    df[col] = pd.to_numeric(numeric_col, errors='coerce')
+            except Exception:
+                pass # Leave as object if all conversions fail
+    return df
+
+# --- Main Sandbox Execution ---
+df = pd.DataFrame() # Initialize empty DataFrame
+primary_file_path = f"''' + (primary_file if primary_file else '') + '''"
+if primary_file_path:
+    df = robust_data_loader(primary_file_path)
+    df = clean_dataframe(df)
+
 '''
         full_script = helper_code + "\n\n" + script
         script_path = os.path.join(temp_dir, "main.py")
@@ -183,15 +257,14 @@ def json_serializer_helper(obj):
 # 3. API ENDPOINTS
 # ==============================================================================
 
-async def handle_analysis_request(question_text: str, data_file: Optional[UploadFile] = None):
+async def handle_analysis_request(question_text: str, files: List[UploadFile]):
     """Core logic to handle the analysis request."""
     attachment_files: Dict[str, bytes] = {}
-    if data_file and data_file.filename:
-        attachment_files[data_file.filename] = await data_file.read()
-        logging.info(f"Prepared data file for sandbox: {data_file.filename}")
-    else:
-        logging.info("No data file provided with the request.")
-
+    for file in files:
+        if file and file.filename:
+            attachment_files[file.filename] = await file.read()
+    
+    logging.info(f"Prepared {len(attachment_files)} file(s) for sandbox: {list(attachment_files.keys())}")
 
     if "scrape" in question_text.lower() or "from the url" in question_text.lower():
         url_match = re.search(r"https?://\S+", question_text)
@@ -244,16 +317,11 @@ async def analyze(request: Request):
         question_text = (await question_file.read()).decode('utf-8')
         logger.info("Successfully read 'questions.txt'.")
         
-        # Data files are optional. Find the first one that isn't questions.txt
-        data_file = None
-        for key, value in form_data.items():
-            if hasattr(value, 'filename') and key != "questions.txt":
-                data_file = value
-                logger.info(f"Found optional data file '{data_file.filename}' under form key '{key}'")
-                break
+        # All other files are treated as data files (optional)
+        data_files = [value for key, value in form_data.items() if hasattr(value, 'filename') and key != "questions.txt"]
 
         return await asyncio.wait_for(
-            handle_analysis_request(question_text, data_file), 
+            handle_analysis_request(question_text, data_files), 
             timeout=REQUEST_TIMEOUT_SEC
         )
     except HTTPException as e:
