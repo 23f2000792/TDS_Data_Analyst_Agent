@@ -29,8 +29,8 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Using a faster model to prevent server timeouts on platforms like Render.
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-REQUEST_TIMEOUT_SEC = 350
-CODE_EXEC_TIMEOUT_SEC = 340
+REQUEST_TIMEOUT_SEC = 170 # 3 minutes minus a buffer
+CODE_EXEC_TIMEOUT_SEC = 160
 OPENAI_CLIENT_TIMEOUT_SEC = 60 # Fail fast if OpenAI is slow
 
 # --- Logging Configuration ---
@@ -78,13 +78,14 @@ def generate_python_code(prompt: str) -> str:
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
         "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `networkx`, and `matplotlib`. "
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **File Path**: The data file is in the current working directory. Load it directly by its filename (e.g., `pd.read_csv('sample-sales.csv')`).\n"
-        "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "4.  **Date Conversion**: If a column contains dates (e.g., '2024-01-15', '1/15/2024'), you MUST convert it to datetime objects before performing any date-related operations: `df['date_column'] = pd.to_datetime(df['date_column'], errors='coerce')`.\n"
-        "5.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "2.  **Data Loading**: Load the data file (e.g., `pd.read_csv('sample-sales.csv')`) into a DataFrame named `df`.\n"
+        "3.  **MANDATORY Column Cleaning**: Immediately after loading the data, you **MUST** clean the column names to prevent errors from spaces or special characters. Use this exact code: `df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace(r'[^a-zA-Z0-9_]', '', regex=True)`.\n"
+        "4.  **Date Conversion**: If a column contains dates (e.g., '2024-01-15', '1/15/2024'), you MUST convert it to datetime objects *after* cleaning the column names: `df['cleaned_date_column'] = pd.to_datetime(df['cleaned_date_column'], errors='coerce')`.\n"
+        "5.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
+        "6.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "6.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
-        "7.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "7.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
+        "8.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
@@ -223,22 +224,21 @@ async def handle_analysis_request(question_text: str, data_file: Optional[Upload
         return JSONResponse(content={"result": result_stdout})
 
 
-@app.post("/")
+@app.post("/api/")
 async def analyze(request: Request):
     """
     Main API endpoint for data analysis. Manually parses multipart/form-data
     to robustly handle requests from various clients, including the evaluation script.
     """
-    logger.info("Received POST request to /analyze endpoint.")
+    logger.info("Received POST request to /api/ endpoint.")
     try:
         form_data = await request.form()
         logger.info(f"Received form data with keys: {list(form_data.keys())}")
         
         # The question file is always expected.
         question_file = form_data.get("questions.txt")
-        # FLEXIBLE CHECK: Check if the object has a 'filename' attribute to identify it as a file upload.
         if not question_file or not hasattr(question_file, 'filename'):
-             raise HTTPException(status_code=422, detail="Missing or invalid 'questions.txt' file in form data.")
+             raise HTTPException(status_code=422, detail="Missing 'questions.txt' file in form data.")
         
         question_text = (await question_file.read()).decode('utf-8')
         logger.info("Successfully read 'questions.txt'.")
@@ -404,7 +404,7 @@ async def get_dashboard():
             this.showLoading(true);
             try {
                 const formData = new FormData(this.form);
-                const response = await fetch('/', {
+                const response = await fetch('/api/', { // Corrected to /api/
                     method: 'POST',
                     body: formData
                 });
