@@ -26,7 +26,8 @@ load_dotenv()
 
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
+# CRITICAL CHANGE: Switched to a faster model to prevent server timeouts.
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
 REQUEST_TIMEOUT_SEC = 350
 CODE_EXEC_TIMEOUT_SEC = 340
 
@@ -241,6 +242,7 @@ async def analyze(request: Request):
     Main API endpoint for data analysis. Manually parses multipart/form-data
     to robustly handle requests from various clients, including the evaluation script.
     """
+    logger.info("Received POST request to /analyze endpoint.")
     try:
         form_data = await request.form()
         logger.info(f"Received form data with keys: {list(form_data.keys())}")
