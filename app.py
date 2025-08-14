@@ -199,10 +199,13 @@ async def handle_analysis_request(request: Request):
     questions_file: UploadFile = None
     attachment_files: Dict[str, bytes] = {}
     
+    # The evaluation platform sends files with specific field names.
+    # We must iterate through all items to find them.
     for key in form.keys():
         for file in form.getlist(key):
             if isinstance(file, UploadFile) and file.filename:
-                if 'questions.txt' in file.filename.lower() and not questions_file:
+                # The primary check is for the field name being 'questions.txt'
+                if key == 'questions.txt' and not questions_file:
                     questions_file = file
                 else:
                     attachment_files[file.filename] = await file.read()
