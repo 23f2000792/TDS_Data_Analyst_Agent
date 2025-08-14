@@ -26,8 +26,8 @@ load_dotenv()
 # --- API Keys and Model Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-REQUEST_TIMEOUT_SEC = 350  # Total time for the entire API request to complete
-CODE_EXEC_TIMEOUT_SEC = 340  # Max time for the generated Python script to run
+REQUEST_TIMEOUT_SEC = 350
+CODE_EXEC_TIMEOUT_SEC = 340
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -64,25 +64,30 @@ def generate_python_code(prompt: str) -> str:
     if not openai_client:
         raise HTTPException(status_code=503, detail="OpenAI client not initialized. Check API key.")
 
-    # This is the hardened system prompt that forces the AI to produce correct, robust code.
+    # This is the final, hardened system prompt with explicit data cleaning and debugging instructions.
     system_prompt = (
         "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
         "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON array or object** that contains the final, raw answer values. "
         "Do not include descriptive text. All other logs or debug information must be written to **standard error (stderr)**.\n\n"
         "Respond ONLY with the Python code inside a markdown block: ```python\n...code...\n```\n\n"
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
-        "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `duckdb`, `networkx`, and `matplotlib`. "
+        "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `duckdb`, `networkx`, and `matplotlib`. "
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **Data Source**: The user's files are in the current working directory. Load them by their filename (e.g., `pd.read_csv('sample-sales.csv')`). Analyze the user's question and the list of available files to determine the correct analysis scenario.\n"
-        "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "4.  **HTML Table Processing**: If reading data from an HTML file with `pd.read_html`, the DataFrame might have a MultiIndex. "
+        "2.  **File Listing (MANDATORY)**: Your script's first executable line of code after imports MUST be `print(f'Files in directory: {os.listdir()}', file=sys.stderr)`. This is essential for debugging and ensures you know the exact filenames available.\n"
+        "3.  **Data Source**: Use the file list printed to stderr to identify the correct file to load. Load files by their exact filename (e.g., `pd.read_csv('sample-sales.csv')`).\n"
+        "4.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
+        "5.  **HTML Table Processing**: If reading from an HTML file with `pd.read_html`, the DataFrame might have a MultiIndex. "
         "    You **MUST** immediately check for and collapse any MultiIndex: `if isinstance(df.columns, pd.MultiIndex): df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]`\n"
-        "5.  **MANDATORY Data Cleaning**:\n"
+        "6.  **MANDATORY Data Cleaning**:\n"
         r"    a. **Clean Column Names**: After loading data, robustly clean all column names. Ensure they are strings, then apply cleaning: `df.columns = df.columns.str.lower().str.strip().str.replace(r'\[.*?\]', '', regex=True).str.replace(r'[^\\w]+', '_', regex=True)`." + "\n"
-        "6.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
+        "    b. **CRITICAL NUMERIC CLEANING**: When a column contains numbers but is read as a string (e.g., '$1,234.56'), you MUST clean it using this EXACT three-step process:\n"
+        "        i. Force to string: `df['column_name'] = df['column_name'].astype(str)`\n"
+        "        ii. Remove all non-digit/non-decimal characters: `df['column_name'] = df['column_name'].str.replace(r'[^\\d.]', '', regex=True)`\n"
+        "        iii. Convert to numeric: `df['column_name'] = pd.to_numeric(df['column_name'], errors='coerce')`\n"
+        "7.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "7.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types (like `np.int64`) to native Python types (`int`, `float`).\n"
-        "8.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict_or_list, default=json_serializer_helper))`. This is the ONLY print to stdout."
+        "8.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types (like `np.int64`) to native Python types (`int`, `float`).\n"
+        "9.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict_or_list, default=json_serializer_helper))`. This is the ONLY print to stdout."
     )
     
     try:
@@ -95,7 +100,7 @@ def generate_python_code(prompt: str) -> str:
             temperature=0.0,
         )
         llm_response = resp.choices[0].message.content
-        match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
+        match = re.search(r"```python\n(.*?)\n```", ll_response, re.DOTALL)
         if match:
             return match.group(1).strip()
         if "import pandas" in llm_response:
