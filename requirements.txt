@@ -1,39 +1,22 @@
-# FastAPI and Web Server
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
-
-# LLM and Code Execution
-groq
-docker
-
-# Data Analysis and Plotting
-requests
-urllib3
-pandas
-matplotlib
-seaborn
-duckdb
-scikit-learn
-beautifulsoup4
-lxml
-sqlalchemy
-openai
-lxml
-networkx
-
-# For loading environment variables from .env file
-python-dotenv
-
-pyarrow
-sqlalchemy
-fsspec
-flask
-
-gradio>=4.20.0
 pandas
 numpy
-networkx  
 matplotlib
 seaborn
+networkx
+requests
+python-dotenv
+beautifulsoup4
+lxml
 pillow
+langchain
+langchain-core
+langchain-google-genai
+google-generativeai
+openpyxl
+pyarrow
+tabulate
+html5lib
+duckdb
