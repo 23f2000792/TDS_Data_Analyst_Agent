@@ -78,7 +78,7 @@ def generate_python_code(prompt: str) -> str:
         "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
         "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `networkx`, and `matplotlib`. "
         "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **Data Access**: You will be provided with a pre-cleaned pandas DataFrame named `df`. **DO NOT load any files or perform any data cleaning yourself.** The DataFrame is ready for immediate analysis.\n"
+        "2.  **Data Access**: A pandas DataFrame named `df` has been pre-loaded and **fully cleaned** for you. Column names are standardized (lowercase_with_underscores), and columns containing numbers or dates have already been converted to the correct data types. **DO NOT load any files. DO NOT perform any data type conversions (e.g., `pd.to_datetime`, `pd.to_numeric`) or string cleaning (e.g., `.str.replace()`) on the `df` you are given.** Doing so will cause the script to fail. Proceed directly to the analysis using the cleaned `df`.\n"
         "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
         "4.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
         "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
@@ -123,7 +123,7 @@ async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
                 if not filename.lower().endswith('.html'):
                     primary_file = filename
                     break
-            if not primary_file: # Fallback if only an HTML file exists
+            if not primary_file and files: # Fallback if only an HTML file exists
                 primary_file = list(files.keys())[0]
 
         # Write all files to the sandbox
@@ -175,7 +175,6 @@ def robust_data_loader(file_path):
         elif file_ext == '.parquet':
             return pd.read_parquet(file_path)
         else:
-            # Fallback for plain text files
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 return pd.DataFrame([line.strip() for line in f.readlines()], columns=['text'])
     except Exception as e:
@@ -184,7 +183,7 @@ def robust_data_loader(file_path):
 
 def clean_dataframe(df):
     """Applies a series of robust cleaning operations to a DataFrame."""
-    if not isinstance(df, pd.DataFrame):
+    if not isinstance(df, pd.DataFrame) or df.empty:
         return df
 
     # 1. Clean column names
@@ -192,24 +191,32 @@ def clean_dataframe(df):
 
     # 2. Intelligently convert types
     for col in df.columns:
-        # Attempt numeric conversion for object columns
         if df[col].dtype == 'object':
-            # Try converting to datetime
+            series = df[col].dropna()
+            if series.empty:
+                continue
+            
+            # Attempt datetime conversion
             try:
-                df[col] = pd.to_datetime(df[col], errors='raise')
-                continue # Skip to next column if successful
+                df[col] = pd.to_datetime(series, errors='raise')
+                continue
             except (ValueError, TypeError):
                 pass
             
-            # Try converting to numeric
+            # Attempt numeric conversion, handling suffixes like 'billion', 'million'
             try:
-                # Handle strings with currency symbols, commas, etc.
-                numeric_col = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
-                # Check if there's anything left to convert
+                numeric_series = series.astype(str).str.lower()
+                multiplier = 1
+                if numeric_series.str.contains('billion').any():
+                    multiplier = 1_000_000_000
+                elif numeric_series.str.contains('million').any():
+                    multiplier = 1_000_000
+                
+                numeric_col = numeric_series.str.replace(r'[^\d.]', '', regex=True)
                 if numeric_col.str.strip().str.len().any():
-                    df[col] = pd.to_numeric(numeric_col, errors='coerce')
+                    df[col] = pd.to_numeric(numeric_col, errors='coerce') * multiplier
             except Exception:
-                pass # Leave as object if all conversions fail
+                pass
     return df
 
 # --- Main Sandbox Execution ---
