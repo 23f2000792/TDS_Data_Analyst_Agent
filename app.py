@@ -422,21 +422,22 @@ prompt = ChatPromptTemplate.from_messages([
     ("system", """You are a full-stack autonomous data analyst agent.
 
 You will receive:
-- A set of **rules** for this request (these rules may differ depending on whether a dataset is uploaded or not)
-- One or more **questions**
+- A set of **rules** for this request
+- A **task description** which includes questions and required JSON keys
 - An optional **dataset preview**
 
 You must:
 1. Follow the provided rules exactly.
 2. Return only a valid JSON object — no extra commentary or formatting.
-3. The JSON must contain:
-   - "questions": [ list of original question strings exactly as provided ]
-   - "code": "..." (Python code that creates a dict called `results` with each question string as a key and its computed answer as the value)
-4. Your Python code will run in a sandbox with:
+3. The JSON must contain a single key: "code".
+4. The value of "code" must be a Python script that populates a dictionary called `results`.
+5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
+6. Your Python code will run in a sandbox with:
    - pandas, numpy, matplotlib, networkx available
-   - A helper function `plot_to_base64(max_bytes=100000)` for generating base64-encoded images under 100KB.
-5. When returning plots, always use `plot_to_base64()` to keep image sizes small.
-6. Make sure all variables are defined before use, and the code can run without any undefined references.
+   - A helper function `plot_to_base64()` for generating base64-encoded images under 100KB.
+7. For plots, always use `plot_to_base64()` and return a raw base64 string (no data URI).
+8. All numeric values in the final `results` dict must be actual numbers (int/float), not strings.
+9. Round all floating-point numbers to 2 decimal places.
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -444,7 +445,7 @@ You must:
 
 agent = create_tool_calling_agent(
     llm=llm,
-    tools=[scrape_url_to_dataframe],  # let the agent call tools if it wants; we will also pre-process scrapes
+    tools=[scrape_url_to_dataframe],
     prompt=prompt
 )
 
@@ -452,75 +453,15 @@ agent_executor = AgentExecutor(
     agent=agent,
     tools=[scrape_url_to_dataframe],
     verbose=True,
-    max_iterations=3,
+    max_iterations=4,
     early_stopping_method="generate",
-    handle_parsing_errors=True,
+    handle_parsing_errors=lambda e: f"Output parsing error: {e}",
     return_intermediate_steps=False
 )
-
 
 # -----------------------------
 # Runner: orchestrates agent -> pre-scrape inject -> execute
 # -----------------------------
-def run_agent_safely(llm_input: str) -> Dict:
-    """
-    1. Run the agent_executor.invoke to get LLM output
-    2. Extract JSON, get 'code' and 'questions'
-    3. Detect scrape_url_to_dataframe("...") calls in code, run them here, pickle df and inject before exec
-    4. Execute the code in a temp file and return results mapping questions -> answers
-    """
-    try:
-        response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
-        raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
-        if not raw_out:
-            return {"error": f"Agent returned no output. Full response: {response}"}
-
-        parsed = clean_llm_output(raw_out)
-        if "error" in parsed:
-            return parsed
-
-        if not isinstance(parsed, dict) or "code" not in parsed or "questions" not in parsed:
-            return {"error": f"Invalid agent response format: {parsed}"}
-
-        code = parsed["code"]
-        questions: List[str] = parsed["questions"]
-
-        # Detect scrape calls; find all URLs used in scrape_url_to_dataframe("URL")
-        urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
-        pickle_path = None
-        if urls:
-            # For now support only the first URL (agent may code multiple scrapes; you can extend this)
-            url = urls[0]
-            tool_resp = scrape_url_to_dataframe.invoke(url) # <-- DEPRECATION FIX
-            if tool_resp.get("status") != "success":
-                return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
-            # create df and pickle it
-            df = pd.DataFrame(tool_resp["data"])
-            temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
-            temp_pkl.close()
-            df.to_pickle(temp_pkl.name)
-            pickle_path = temp_pkl.name
-            # Make sure agent's code can reference df/data: we will inject the pickle loader in the temp script
-
-        # Execute code in temp python script
-        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
-        if exec_result.get("status") != "success":
-            return {"error": f"Execution failed: {exec_result.get('message', exec_result)}", "raw": exec_result.get("raw")}
-
-        # exec_result['result'] should be results dict
-        results_dict = exec_result.get("result", {})
-        # Map to original questions (they asked to use exact question strings)
-        output = {}
-        for q in questions:
-            output[q] = results_dict.get(q, "Answer not found")
-        return output
-
-    except Exception as e:
-        logger.exception("run_agent_safely failed")
-        return {"error": str(e)}
-
-
-from fastapi import Request
 
 @app.post("/")
 @app.post("/api/")
@@ -543,6 +484,7 @@ async def analyze_data(request: Request):
             raise HTTPException(400, "Missing questions file (.txt)")
 
         raw_questions = (await questions_file.read()).decode("utf-8")
+        keys_list, type_map = parse_keys_and_types(raw_questions)
         
         pickle_path = None
         df_preview = ""
@@ -569,7 +511,7 @@ async def analyze_data(request: Request):
                 try:
                     if PIL_AVAILABLE:
                         image = Image.open(BytesIO(content))
-                        image = image.convert("RGB")  # ensure RGB format
+                        image = image.convert("RGB")
                         df = pd.DataFrame({"image": [image]})
                     else:
                         raise HTTPException(400, "PIL not available for image processing")
@@ -578,45 +520,35 @@ async def analyze_data(request: Request):
             else:
                 raise HTTPException(400, f"Unsupported data file type: {filename}")
 
-            # Pickle for injection
             temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
             temp_pkl.close()
             df.to_pickle(temp_pkl.name)
             pickle_path = temp_pkl.name
 
             df_preview = (
-                f"\n\nThe uploaded dataset has {len(df)} rows and {len(df.columns)} columns.\n"
+                f"\n\nDataset Preview:\n"
                 f"Columns: {', '.join(df.columns.astype(str))}\n"
-                f"First rows:\n{df.head(5).to_markdown(index=False)}\n"
+                f"First 5 rows:\n{df.head(5).to_markdown(index=False)}\n"
             )
 
-        # Build rules based on data presence
         if dataset_uploaded:
             llm_rules = (
                 "Rules:\n"
-                "1) You have access to a pandas DataFrame called `df` and its dictionary form `data`.\n"
-                "2) DO NOT call scrape_url_to_dataframe() or fetch any external data.\n"
-                "3) Use only the uploaded dataset for answering questions.\n"
-                "4) Your generated python code MUST create a dictionary called `results`.\n"
-                "5) The keys in the `results` dictionary MUST be the snake_case identifiers (e.g., 'edge_count', 'highest_degree_node') specified in the questions file.\n"
-                "6) For plots: use the pre-defined plot_to_base64() helper to return base64 image data under 100kB.\n"
+                "1) Use the provided pandas DataFrame called `df`.\n"
+                "2) DO NOT call scrape_url_to_dataframe().\n"
             )
         else:
             llm_rules = (
                 "Rules:\n"
-                "1) If you need web data, call the pre-defined function `scrape_url_to_dataframe(url)`. It is already available, DO NOT import it.\n"
-                "2) Your generated python code MUST create a dictionary called `results`.\n"
-                "3) The keys in the `results` dictionary MUST be the snake_case identifiers (e.g., 'edge_count', 'highest_degree_node') specified in the questions file.\n"
-                "4) For plots: use the pre-defined plot_to_base64() helper to return base64 image data under 100kB.\n"
+                "1) You must call `scrape_url_to_dataframe(url)` to get data.\n"
             )
 
         llm_input = (
-            f"{llm_rules}\nQuestions:\n{raw_questions}\n"
+            f"{llm_rules}\nTask Description:\n{raw_questions}\n"
             f"{df_preview if df_preview else ''}"
             "Respond with the JSON object only."
         )
 
-        # Run agent
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as ex:
             fut = ex.submit(run_agent_safely_unified, llm_input, pickle_path)
@@ -628,7 +560,27 @@ async def analyze_data(request: Request):
         if "error" in result:
             raise HTTPException(500, detail=result["error"])
 
-        return JSONResponse(content=result)
+        # Post-process to ensure correct types
+        final_result = {}
+        for key in keys_list:
+            if key in result:
+                caster = type_map.get(key, str)
+                try:
+                    val = result[key]
+                    if isinstance(val, str) and caster != str:
+                         # Avoid casting base64 strings
+                        if not val.startswith(('iVBO', '/9j/')):
+                            final_result[key] = caster(val)
+                        else:
+                            final_result[key] = val
+                    else:
+                        final_result[key] = caster(val)
+                except (ValueError, TypeError):
+                    final_result[key] = result[key] # Keep original if cast fails
+            else:
+                 final_result[key] = None # Or some default value
+
+        return JSONResponse(content=final_result)
 
     except HTTPException as he:
         raise he
@@ -640,27 +592,24 @@ async def analyze_data(request: Request):
 def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
     """
     Runs the LLM agent and executes code.
-    - Retries up to 3 times if agent returns no output.
-    - If pickle_path is provided, injects that DataFrame directly.
-    - If no pickle_path, falls back to scraping when needed.
     """
     try:
-        max_retries = 3
+        max_retries = 2
         raw_out = ""
         for attempt in range(1, max_retries + 1):
             response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
-            raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
-            if raw_out:
+            raw_out = response.get("output") or ""
+            if raw_out and "code" in raw_out:
                 break
         if not raw_out:
-            return {"error": f"Agent returned no output after {max_retries} attempts"}
+            return {"error": f"Agent returned no usable output after {max_retries} attempts. Last response: {raw_out}"}
 
         parsed = clean_llm_output(raw_out)
         if "error" in parsed:
             return parsed
 
-        if "code" not in parsed or "questions" not in parsed:
-            return {"error": f"Invalid agent response: {parsed}"}
+        if "code" not in parsed:
+            return {"error": f"Invalid agent response: 'code' key missing. Response: {parsed}"}
 
         code = parsed["code"]
         
@@ -668,7 +617,7 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
             urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
             if urls:
                 url = urls[0]
-                tool_resp = scrape_url_to_dataframe.invoke(url) # <-- DEPRECATION FIX
+                tool_resp = scrape_url_to_dataframe.invoke(url)
                 if tool_resp.get("status") != "success":
                     return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
                 df = pd.DataFrame(tool_resp["data"])
@@ -702,7 +651,6 @@ _FAVICON_FALLBACK_PNG = base64.b64decode(
 async def favicon():
     """
     Serve favicon.ico if present in the working directory.
-    Otherwise return a tiny transparent PNG to avoid 404s.
     """
     path = "favicon.ico"
     if os.path.exists(path):
