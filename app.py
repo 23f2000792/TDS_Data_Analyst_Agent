@@ -39,7 +39,7 @@ except Exception:
 
 # LangChain / LLM imports
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI 
+from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 
@@ -382,8 +382,9 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # LLM agent setup
 # -----------------------------
+# Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "GPT-4.1"),
+    model=os.getenv("OPENAI_MODEL", "gpt-4.1"), # <-- CHANGED
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
