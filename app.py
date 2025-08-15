@@ -45,7 +45,7 @@ from langchain.agents import create_tool_calling_agent, AgentExecutor
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-logger = a.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TDS Data Analyst Agent")
 
