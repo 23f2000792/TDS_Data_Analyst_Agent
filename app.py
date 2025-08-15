@@ -45,7 +45,7 @@ from langchain.agents import create_tool_calling_agent, AgentExecutor
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = a.getLogger(__name__)
 
 app = FastAPI(title="TDS Data Analyst Agent")
 
@@ -384,7 +384,7 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "gpt-4.1"), # <-- CHANGED
+    model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
@@ -580,7 +580,7 @@ async def analyze_data(request: Request):
         else:
             llm_rules = (
                 "Rules:\n"
-                "1) If you need web data, CALL scrape_url_to_dataframe(url).\n"
+                "1) If you need web data, call the pre-defined function `scrape_url_to_dataframe(url)`. It is already available, DO NOT import it.\n"
                 "2) Produce a final JSON object with keys:\n"
                 '   - "questions": [ ... original question strings ... ]\n'
                 '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
