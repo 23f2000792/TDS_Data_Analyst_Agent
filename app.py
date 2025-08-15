@@ -311,7 +311,8 @@ def plot_to_base64(max_bytes=100000):
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
     plt.clf()
-    plt.close()
+    plt.close('all')
+    gc.collect()
     buf.seek(0)
     img_bytes = buf.getvalue()
     if len(img_bytes) <= max_bytes:
@@ -321,7 +322,8 @@ def plot_to_base64(max_bytes=100000):
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
         plt.clf()
-        plt.close()
+        plt.close('all')
+        gc.collect()
         buf.seek(0)
         b = buf.getvalue()
         if len(b) <= max_bytes:
@@ -332,7 +334,8 @@ def plot_to_base64(max_bytes=100000):
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
         plt.clf()
-        plt.close()
+        plt.close('all')
+        gc.collect()
         buf.seek(0)
         im = Image.open(buf)
         out_buf = BytesIO()
@@ -354,7 +357,8 @@ def plot_to_base64(max_bytes=100000):
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
     plt.clf()
-    plt.close()
+    plt.close('all')
+    gc.collect()
     buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
@@ -404,7 +408,7 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
+    model=os.getenv("OPENAI_MODEL", "o3-mini"),
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
