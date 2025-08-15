@@ -39,7 +39,7 @@ except Exception:
 
 # LangChain / LLM imports
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI  # <-- CHANGED: Imported ChatOpenAI
+from langchain_openai import ChatOpenAI 
 from langchain_core.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 
@@ -382,12 +382,10 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # LLM agent setup
 # -----------------------------
-# Note: The user requested "chatgpt-4.1-nano". The closest valid model is "gpt-4.1-turbo".
-# Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "gpt-4.1-turbo"), # <-- CHANGED
+    model=os.getenv("OPENAI_MODEL", "GPT-4.1"),
     temperature=0,
-    openai_api_key=os.getenv("OPENAI_API_KEY")       # <-- CHANGED
+    openai_api_key=os.getenv("OPENAI_API_KEY")
 )
 
 
