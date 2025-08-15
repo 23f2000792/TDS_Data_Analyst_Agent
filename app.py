@@ -1,552 +1,719 @@
 import os
-import io
+import networkx as nx
+import re
 import json
 import base64
 import tempfile
-import asyncio
-import logging
-import re
 import sys
-import time
-from typing import Dict, Any, List, Optional
-
-import subprocess
-from fastapi import FastAPI, UploadFile, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, Response
-from starlette.middleware.cors import CORSMiddleware
-from openai import OpenAI
-from dotenv import load_dotenv
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
+import os
+import re
+import json
+import base64
+import tempfile
+import subprocess
+import logging
+from io import BytesIO
+from typing import Dict, Any, List
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI
+from dotenv import load_dotenv
+
 import requests
+import pandas as pd
+import matplotlib.pyplot as plt
 import numpy as np
 
-# ==============================================================================
-# 1. CONFIGURATION & INITIALIZATION
-# ==============================================================================
+# Optional image conversion
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
+
+# LangChain / LLM imports
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_openai import ChatOpenAI  # <-- CHANGED: Imported ChatOpenAI
+from langchain_core.tools import tool
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+
 load_dotenv()
-
-# --- API Keys and Model Configuration ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-REQUEST_TIMEOUT_SEC = 170
-CODE_EXEC_TIMEOUT_SEC = 160
-OPENAI_CLIENT_TIMEOUT_SEC = 60
-
-# --- Logging Configuration ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FastAPI App Initialization ---
-app = FastAPI(
-    title="Data Analyst Agent (Final Robust Version)",
-    description="A resilient, single-call agent using a secure sandbox for data analysis.",
-)
+app = FastAPI(title="TDS Data Analyst Agent")
 
-# --- CORS Middleware ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 150))
 
-# --- Global OpenAI Client ---
-if not OPENAI_API_KEY:
-    logging.warning("⚠️ OPENAI_API_KEY is not set. The application will not function.")
-    openai_client = None
-else:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_CLIENT_TIMEOUT_SEC)
-    logging.info(f"✅ OpenAI client initialized for model {OPENAI_MODEL}.")
 
-# ==============================================================================
-# 2. CORE LOGIC: CODE GENERATION & EXECUTION
-# ==============================================================================
-
-def generate_python_code(prompt: str) -> str:
-    """Generates Python code from a prompt using a direct, non-agentic LLM call."""
-    if not openai_client:
-        raise HTTPException(status_code=503, detail="OpenAI client not initialized. Check API key.")
-
-    system_prompt = (
-        "You are an expert-level Python data analyst. Your sole task is to generate a complete, self-contained, and robust Python script to answer the user's question. "
-        "The script will be executed in a secure environment. The script's **ONLY** output to **standard output (stdout)** must be a **single JSON object** that contains the final, raw answer values. "
-        "Do not include descriptive text. All other logs or debug information must be written to **standard error (stderr)**.\n\n"
-        "Respond ONLY with the Python code inside a markdown block: ```python\n...code...\n```\n\n"
-        "--- CRITICAL REQUIREMENTS FOR THE GENERATED SCRIPT ---\n"
-        "1.  **Imports**: Always start with all necessary imports, including `pandas`, `json`, `numpy`, `sys`, `os`, `networkx`, and `matplotlib`. "
-        "    **Crucially, set the Matplotlib backend to 'Agg' immediately after importing it: `import matplotlib; matplotlib.use('Agg')` to prevent GUI errors.**\n"
-        "2.  **Data Access**: A pandas DataFrame named `df` has been pre-loaded and **fully cleaned** for you. Column names are standardized (lowercase_with_underscores), and columns containing numbers or dates have already been converted to the correct data types. **DO NOT load any files. DO NOT perform any data type conversions (e.g., `pd.to_datetime`, `pd.to_numeric`) or string cleaning (e.g., `.str.replace()`) on the `df` you are given.** Doing so will cause the script to fail. Proceed directly to the analysis using the cleaned `df`.\n"
-        "3.  **Error Handling**: Wrap all major operations in `try-except` blocks. If an error occurs, print a JSON object to stdout like `{\"error\": \"Descriptive error message\"}` and exit.\n"
-        "4.  **Base64 Images**: When plotting, you MUST encode the image as a base64 string using the provided `plot_to_base64` helper function. "
-        "    The output string MUST be a data URI: `'data:image/png;base64,iVBOR...'`.\n"
-        "5.  **JSON Serialization**: Before printing the final JSON, ensure all data is serializable. Define and use a helper function to recursively convert any numpy types to native Python types.\n"
-        "6.  **Final Output**: The script's final action must be `print(json.dumps(final_answer_dict, default=json_serializer_helper))`. This is the ONLY print to stdout."
-    )
-    
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    """Serve the main HTML interface"""
     try:
-        start_time = time.time()
-        logger.info("Initiating OpenAI API call...")
-        resp = openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0,
-        )
-        duration = time.time() - start_time
-        logger.info(f"OpenAI API call completed in {duration:.2f} seconds.")
-        
-        llm_response = resp.choices[0].message.content
-        match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        if "import pandas" in llm_response:
-            return llm_response
-        raise ValueError("Could not extract Python code from the LLM response.")
+        with open("index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Frontend not found</h1><p>Please ensure index.html is in the same directory as app.py</p>", status_code=404)
+
+
+def parse_keys_and_types(raw_questions: str):
+    """
+    Parses the key/type section from the questions file.
+    Returns:
+        keys_list: list of keys in order
+        type_map: dict key -> casting function
+    """
+    import re
+    pattern = r"-\s*`([^`]+)`\s*:\s*(\w+)"
+    matches = re.findall(pattern, raw_questions)
+    type_map_def = {
+        "number": float,
+        "string": str,
+        "integer": int,
+        "int": int,
+        "float": float
+    }
+    type_map = {key: type_map_def.get(t.lower(), str) for key, t in matches}
+    keys_list = [k for k, _ in matches]
+    return keys_list, type_map
+
+
+
+
+# -----------------------------
+# Tools
+# -----------------------------
+
+@tool
+def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
+    """
+    Fetch a URL and return data as a DataFrame (supports HTML tables, CSV, Excel, Parquet, JSON, and plain text).
+    Always returns {"status": "success", "data": [...], "columns": [...]} if fetch works.
+    """
+    print(f"Scraping URL: {url}")
+    try:
+        from io import BytesIO, StringIO
+        from bs4 import BeautifulSoup
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/138.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.google.com/",
+        }
+
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "").lower()
+
+        df = None
+
+        # --- CSV ---
+        if "text/csv" in ctype or url.lower().endswith(".csv"):
+            df = pd.read_csv(BytesIO(resp.content))
+
+        # --- Excel ---
+        elif any(url.lower().endswith(ext) for ext in (".xls", ".xlsx")) or "spreadsheetml" in ctype:
+            df = pd.read_excel(BytesIO(resp.content))
+
+        # --- Parquet ---
+        elif url.lower().endswith(".parquet"):
+            df = pd.read_parquet(BytesIO(resp.content))
+
+        # --- JSON ---
+        elif "application/json" in ctype or url.lower().endswith(".json"):
+            try:
+                data = resp.json()
+                df = pd.json_normalize(data)
+            except Exception:
+                df = pd.DataFrame([{"text": resp.text}])
+
+        # --- HTML / Fallback ---
+        elif "text/html" in ctype or re.search(r'/wiki/|\.org|\.com', url, re.IGNORECASE):
+            html_content = resp.text
+            # Try HTML tables first
+            try:
+                tables = pd.read_html(StringIO(html_content), flavor="bs4")
+                if tables:
+                    df = tables[0]
+            except ValueError:
+                pass
+
+            # If no table found, fallback to plain text
+            if df is None:
+                soup = BeautifulSoup(html_content, "html.parser")
+                text = soup.get_text(separator="\n", strip=True)
+                df = pd.DataFrame({"text": [text]})
+
+        # --- Unknown type fallback ---
+        else:
+            df = pd.DataFrame({"text": [resp.text]})
+
+        # --- Normalize columns ---
+        df.columns = df.columns.map(str).str.replace(r'\[.*\]', '', regex=True).str.strip()
+
+        return {
+            "status": "success",
+            "data": df.to_dict(orient="records"),
+            "columns": df.columns.tolist()
+        }
+
     except Exception as e:
-        logger.error(f"OpenAI API call failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Error communicating with LLM provider: {e}")
+        return {"status": "error", "message": str(e)}
 
-async def execute_code_in_sandbox(script: str, files: Dict[str, bytes]) -> str:
-    """Executes a Python script in a temporary directory with provided files using asyncio."""
-    with tempfile.TemporaryDirectory() as temp_dir:
+
+# -----------------------------
+# Utilities for executing code safely
+# -----------------------------
+def clean_llm_output(output: str) -> Dict:
+    """
+    Extract JSON object from LLM output robustly.
+    Returns dict or {"error": "..."}
+    """
+    try:
+        if not output:
+            return {"error": "Empty LLM output"}
+        # remove triple-fence markers if present
+        s = re.sub(r"^```(?:json)?\s*", "", output.strip())
+        s = re.sub(r"\s*```$", "", s)
+        # find outermost JSON object by scanning for balanced braces
+        first = s.find("{")
+        last = s.rfind("}")
+        if first == -1 or last == -1 or last <= first:
+            return {"error": "No JSON object found in LLM output", "raw": s}
+        candidate = s[first:last+1]
+        try:
+            return json.loads(candidate)
+        except Exception as e:
+            # fallback: try last balanced pair scanning backwards
+            for i in range(last, first, -1):
+                cand = s[first:i+1]
+                try:
+                    return json.loads(cand)
+                except Exception:
+                    continue
+            return {"error": f"JSON parsing failed: {str(e)}", "raw": candidate}
+    except Exception as e:
+        return {"error": str(e)}
+
+SCRAPE_FUNC = r'''
+from typing import Dict, Any
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import re
+
+def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5
+        )
+        response.raise_for_status()
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "data": [],
+            "columns": []
+        }
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    tables = pd.read_html(response.text)
+
+    if tables:
+        df = tables[0]  # Take first table
+        df.columns = [str(c).strip() for c in df.columns]
         
-        primary_file = None
-        if files:
-            for filename in files:
-                if not filename.lower().endswith('.html'):
-                    primary_file = filename
-                    break
-            if not primary_file and files:
-                primary_file = list(files.keys())[0]
+        # Ensure all columns are unique and string
+        df.columns = [str(col) for col in df.columns]
 
-        for filename, content in files.items():
-            with open(os.path.join(temp_dir, filename), "wb") as f:
-                f.write(content)
+        return {
+            "status": "success",
+            "data": df.to_dict(orient="records"),
+            "columns": list(df.columns)
+        }
+    else:
+        # Fallback to plain text
+        text_data = soup.get_text(separator="\n", strip=True)
 
-        helper_code = r'''
-import base64, io, json, os, sys, re
-import matplotlib, numpy as np, pandas as pd
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+        # Try to detect possible "keys" from text like Runtime, Genre, etc.
+        detected_cols = set(re.findall(r"\b[A-Z][a-zA-Z ]{2,15}\b", text_data))
+        df = pd.DataFrame([{}])  # start empty
+        for col in detected_cols:
+            df[col] = None
 
-def plot_to_base64():
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=80)
-    plt.clf(); plt.close()
+        if df.empty:
+            df["text"] = [text_data]
+
+        return {
+            "status": "success",
+            "data": df.to_dict(orient="records"),
+            "columns": list(df.columns)
+        }
+'''
+
+
+def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
+    """
+    Write a temp python file which:
+      - provides a safe environment (imports)
+      - loads df/from pickle if provided into df and data variables
+      - defines a robust plot_to_base64() helper that ensures < 100kB (attempts resizing/conversion)
+      - executes the user code (which should populate `results` dict)
+      - prints json.dumps({"status":"success","result":results})
+    Returns dict with parsed JSON or error details.
+    """
+    # create file content
+    preamble = [
+        "import json, sys, gc",
+        "import pandas as pd, numpy as np",
+        "import matplotlib",
+        "matplotlib.use('Agg')",
+        "import matplotlib.pyplot as plt",
+        "from io import BytesIO",
+        "import base64",
+    ]
+    if PIL_AVAILABLE:
+        preamble.append("from PIL import Image")
+    # inject df if a pickle path provided
+    if injected_pickle:
+        preamble.append(f"df = pd.read_pickle(r'''{injected_pickle}''')\n")
+        preamble.append("data = df.to_dict(orient='records')\n")
+    else:
+        # ensure data exists so user code that references data won't break
+        preamble.append("data = globals().get('data', {})\n")
+
+    # plot_to_base64 helper that tries to reduce size under 100_000 bytes
+    helper = r'''
+def plot_to_base64(max_bytes=100000):
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
     buf.seek(0)
     img_bytes = buf.getvalue()
-    if len(img_bytes) > 100 * 1024:
-        print("Warning: Generated image is > 100kB", file=sys.stderr)
-    return "data:image/png;base64," + base64.b64encode(img_bytes).decode('ascii')
-
-def json_serializer_helper(obj):
-    if isinstance(obj, (np.integer, np.int64)): return int(obj)
-    if isinstance(obj, (np.floating, np.float64)): return float(obj)
-    if isinstance(obj, np.ndarray): return obj.tolist()
-    if isinstance(obj, pd.Timestamp): return obj.isoformat()
-    try: return str(obj)
-    except Exception: return f"Unserializable type: {obj.__class__.__name__}"
-
-def robust_data_loader(file_path):
-    if not os.path.exists(file_path): return pd.DataFrame()
-    file_ext = os.path.splitext(file_path)[1].lower()
+    if len(img_bytes) <= max_bytes:
+        return base64.b64encode(img_bytes).decode('ascii')
+    # try decreasing dpi/figure size iteratively
+    for dpi in [80, 60, 50, 40, 30]:
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
+        buf.seek(0)
+        b = buf.getvalue()
+        if len(b) <= max_bytes:
+            return base64.b64encode(b).decode('ascii')
+    # if Pillow available, try convert to WEBP which is typically smaller
     try:
-        if file_ext == '.csv': return pd.read_csv(file_path)
-        elif file_ext in ['.xls', '.xlsx']: return pd.read_excel(file_path)
-        elif file_ext == '.json': return pd.read_json(file_path, lines=True)
-        elif file_ext == '.html':
-            tables = pd.read_html(file_path)
-            return tables[0] if tables else pd.DataFrame()
-        elif file_ext == '.parquet': return pd.read_parquet(file_path)
-        else:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                return pd.DataFrame([line.strip() for line in f.readlines()], columns=['text'])
-    except Exception as e:
-        print(f"Error loading data: {e}", file=sys.stderr)
-        return pd.DataFrame()
-
-def clean_dataframe(df):
-    if not isinstance(df, pd.DataFrame) or df.empty: return df
-    df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace(r'[^a-zA-Z0-9_]', '', regex=True)
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            series = df[col].dropna()
-            if series.empty: continue
-            try:
-                df[col] = pd.to_datetime(series, errors='raise')
-                continue
-            except (ValueError, TypeError): pass
-            try:
-                numeric_series = series.astype(str).str.lower()
-                multiplier = 1
-                if numeric_series.str.contains('billion').any(): multiplier = 1_000_000_000
-                elif numeric_series.str.contains('million').any(): multiplier = 1_000_000
-                numeric_col = numeric_series.str.replace(r'[^\d.-]', '', regex=True)
-                if numeric_col.str.strip().str.len().any():
-                    df[col] = pd.to_numeric(numeric_col, errors='coerce') * multiplier
-            except Exception: pass
-    return df
-
-# --- Main Sandbox Execution ---
-df = pd.DataFrame()
-primary_file_path = f"''' + (primary_file if primary_file else '') + '''"
-if primary_file_path:
-    df = robust_data_loader(primary_file_path)
-    df = clean_dataframe(df)
+        from PIL import Image
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
+        buf.seek(0)
+        im = Image.open(buf)
+        out_buf = BytesIO()
+        im.save(out_buf, format='WEBP', quality=80, method=6)
+        out_buf.seek(0)
+        ob = out_buf.getvalue()
+        if len(ob) <= max_bytes:
+            return base64.b64encode(ob).decode('ascii')
+        # try lower quality
+        out_buf = BytesIO()
+        im.save(out_buf, format='WEBP', quality=60, method=6)
+        out_buf.seek(0)
+        ob = out_buf.getvalue()
+        if len(ob) <= max_bytes:
+            return base64.b64encode(ob).decode('ascii')
+    except Exception:
+        pass
+    # as last resort return downsized PNG even if > max_bytes
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
+    buf.seek(0)
+    return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
-        full_script = helper_code + "\n\n" + script
-        script_path = os.path.join(temp_dir, "main.py")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(full_script)
 
+    # Build the code to write
+    script_lines = []
+    script_lines.extend(preamble)
+    script_lines.append(helper)
+    script_lines.append(SCRAPE_FUNC)
+    script_lines.append("\nresults = {}\n")
+    script_lines.append(code)
+    # ensure results printed as json
+    script_lines.append("\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n")
+
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
+    tmp.write("\n".join(script_lines))
+    tmp.flush()
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        completed = subprocess.run([sys.executable, tmp_path],
+                                     capture_output=True, text=True, timeout=timeout)
+        if completed.returncode != 0:
+            # collect stderr and stdout for debugging
+            return {"status": "error", "message": completed.stderr.strip() or completed.stdout.strip()}
+        # parse stdout as json
+        out = completed.stdout.strip()
         try:
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "main.py",
-                cwd=temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CODE_EXEC_TIMEOUT_SEC)
-            
-            stdout_decoded = stdout.decode('utf-8', errors='ignore').strip()
-            stderr_decoded = stderr.decode('utf-8', errors='ignore').strip()
-            
-            if stderr_decoded:
-                logging.warning(f"STDERR from script:\n{stderr_decoded}")
-            
-            if process.returncode != 0:
-                logging.error(f"Script execution failed with exit code {process.returncode}.")
-                error_detail = stderr_decoded or stdout_decoded or "Unknown execution error."
-                raise HTTPException(status_code=500, detail=f"Script execution failed: {error_detail}")
-            
-            return stdout_decoded
-
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            logging.error("Script execution timed out.")
-            raise HTTPException(status_code=504, detail="Script execution timed out.")
-
-# ==============================================================================
-# 3. API ENDPOINTS
-# ==============================================================================
-
-async def handle_analysis_request(question_text: str, files: List[UploadFile]):
-    """Core logic to handle the analysis request."""
-    attachment_files: Dict[str, bytes] = {}
-    for file in files:
-        if file and file.filename:
-            attachment_files[file.filename] = await file.read()
-    
-    logging.info(f"Prepared {len(attachment_files)} file(s) for sandbox: {list(attachment_files.keys())}")
-
-    if "scrape" in question_text.lower() or "from the url" in question_text.lower():
-        url_match = re.search(r"https?://\S+", question_text)
-        if url_match:
-            url = url_match.group(0).rstrip('.,)!?]>')
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers, timeout=15)
-                response.raise_for_status()
-                attachment_files["scraped_page.html"] = response.content
-                logging.info(f"Successfully scraped content from {url}")
-            except requests.RequestException as e:
-                logging.error(f"Failed to scrape URL {url}: {e}")
-
-    user_prompt = (
-        f"User Question:\n---\n{question_text}\n---\n\n"
-        f"Files available in the current directory: {', '.join(attachment_files.keys()) if attachment_files else 'None'}"
-    )
-
-    python_code = generate_python_code(user_prompt)
-    logging.info(f"Generated Python Code:\n{python_code}")
-    result_stdout = await execute_code_in_sandbox(python_code, attachment_files)
-
-    try:
-        final_json_output = json.loads(result_stdout)
-        if isinstance(final_json_output, dict) and 'error' in final_json_output:
-            raise HTTPException(status_code=422, detail=final_json_output['error'])
-        return JSONResponse(content=final_json_output)
-    except json.JSONDecodeError:
-        logging.warning(f"Script produced non-JSON output. Wrapping it. Output: {result_stdout}")
-        return JSONResponse(content={"result": result_stdout})
+            parsed = json.loads(out)
+            return parsed
+        except Exception as e:
+            return {"status": "error", "message": f"Could not parse JSON output: {str(e)}", "raw": out}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "message": "Execution timed out"}
+    finally:
+        try:
+            os.unlink(tmp_path)
+            if injected_pickle and os.path.exists(injected_pickle):
+                os.unlink(injected_pickle)
+        except Exception:
+            pass
 
 
-@app.post("/api/")
-async def analyze(request: Request):
+# -----------------------------
+# LLM agent setup
+# -----------------------------
+# Note: The user requested "chatgpt-4.1-nano". The closest valid model is "gpt-4.1-turbo".
+# Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
+llm = ChatOpenAI(
+    model=os.getenv("OPENAI_MODEL", "gpt-4.1-turbo"), # <-- CHANGED
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY")       # <-- CHANGED
+)
+
+
+# Tools list for agent (LangChain tool decorator returns metadata for the LLM)
+tools = [scrape_url_to_dataframe]  # we only expose scraping as a tool; agent will still produce code
+
+# Prompt: instruct agent to call the tool and output JSON only
+prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a full-stack autonomous data analyst agent.
+
+You will receive:
+- A set of **rules** for this request (these rules may differ depending on whether a dataset is uploaded or not)
+- One or more **questions**
+- An optional **dataset preview**
+
+You must:
+1. Follow the provided rules exactly.
+2. Return only a valid JSON object — no extra commentary or formatting.
+3. The JSON must contain:
+   - "questions": [ list of original question strings exactly as provided ]
+   - "code": "..." (Python code that creates a dict called `results` with each question string as a key and its computed answer as the value)
+4. Your Python code will run in a sandbox with:
+   - pandas, numpy, matplotlib available
+   - A helper function `plot_to_base64(max_bytes=100000)` for generating base64-encoded images under 100KB.
+5. When returning plots, always use `plot_to_base64()` to keep image sizes small.
+6. Make sure all variables are defined before use, and the code can run without any undefined references.
+"""),
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
+
+agent = create_tool_calling_agent(
+    llm=llm,
+    tools=[scrape_url_to_dataframe],  # let the agent call tools if it wants; we will also pre-process scrapes
+    prompt=prompt
+)
+
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=[scrape_url_to_dataframe],
+    verbose=True,
+    max_iterations=3,
+    early_stopping_method="generate",
+    handle_parsing_errors=True,
+    return_intermediate_steps=False
+)
+
+
+# -----------------------------
+# Runner: orchestrates agent -> pre-scrape inject -> execute
+# -----------------------------
+def run_agent_safely(llm_input: str) -> Dict:
     """
-    Main API endpoint for data analysis. Manually parses multipart/form-data
-    to robustly handle requests from various clients, including the evaluation script.
+    1. Run the agent_executor.invoke to get LLM output
+    2. Extract JSON, get 'code' and 'questions'
+    3. Detect scrape_url_to_dataframe("...") calls in code, run them here, pickle df and inject before exec
+    4. Execute the code in a temp file and return results mapping questions -> answers
     """
-    logger.info("Received POST request to /api/ endpoint.")
     try:
-        form_data = await request.form()
-        logger.info(f"Received form data with keys: {list(form_data.keys())}")
-        
-        question_file = form_data.get("questions.txt")
-        if not question_file or not hasattr(question_file, 'filename'):
-             raise HTTPException(status_code=422, detail="Missing 'questions.txt' file in form data.")
-        
-        question_text = (await question_file.read()).decode('utf-8')
-        logger.info("Successfully read 'questions.txt'.")
-        
-        data_files = [value for key, value in form_data.items() if hasattr(value, 'filename') and key != "questions.txt"]
+        response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
+        raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
+        if not raw_out:
+            return {"error": f"Agent returned no output. Full response: {response}"}
 
-        return await asyncio.wait_for(
-            handle_analysis_request(question_text, data_files), 
-            timeout=REQUEST_TIMEOUT_SEC
-        )
-    except HTTPException as e:
-        raise e
-    except asyncio.TimeoutError:
-        logger.error(f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds.")
-        return JSONResponse(
-            status_code=504,
-            content={"detail": f"Request timed out after {REQUEST_TIMEOUT_SEC} seconds"}
-        )
+        parsed = clean_llm_output(raw_out)
+        if "error" in parsed:
+            return parsed
+
+        if not isinstance(parsed, dict) or "code" not in parsed or "questions" not in parsed:
+            return {"error": f"Invalid agent response format: {parsed}"}
+
+        code = parsed["code"]
+        questions: List[str] = parsed["questions"]
+
+        # Detect scrape calls; find all URLs used in scrape_url_to_dataframe("URL")
+        urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
+        pickle_path = None
+        if urls:
+            # For now support only the first URL (agent may code multiple scrapes; you can extend this)
+            url = urls[0]
+            tool_resp = scrape_url_to_dataframe(url)
+            if tool_resp.get("status") != "success":
+                return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
+            # create df and pickle it
+            df = pd.DataFrame(tool_resp["data"])
+            temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
+            temp_pkl.close()
+            df.to_pickle(temp_pkl.name)
+            pickle_path = temp_pkl.name
+            # Make sure agent's code can reference df/data: we will inject the pickle loader in the temp script
+
+        # Execute code in temp python script
+        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
+        if exec_result.get("status") != "success":
+            return {"error": f"Execution failed: {exec_result.get('message', exec_result)}", "raw": exec_result.get("raw")}
+
+        # exec_result['result'] should be results dict
+        results_dict = exec_result.get("result", {})
+        # Map to original questions (they asked to use exact question strings)
+        output = {}
+        for q in questions:
+            output[q] = results_dict.get(q, "Answer not found")
+        return output
+
     except Exception as e:
-        logger.error(f"An unexpected error occurred in the main analyze endpoint: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"An unexpected server error occurred: {str(e)}"}
+        logger.exception("run_agent_safely failed")
+        return {"error": str(e)}
+
+
+from fastapi import Request
+
+@app.post("/api")
+async def analyze_data(request: Request):
+    try:
+        form = await request.form()
+        questions_file = None
+        data_file = None
+
+        for key, val in form.items():
+            if hasattr(val, "filename") and val.filename:  # it's a file
+                fname = val.filename.lower()
+                if fname.endswith(".txt") and questions_file is None:
+                    questions_file = val
+                else:
+                    data_file = val
+
+        if not questions_file:
+            raise HTTPException(400, "Missing questions file (.txt)")
+
+        raw_questions = (await questions_file.read()).decode("utf-8")
+        keys_list, type_map = parse_keys_and_types(raw_questions)
+
+        pickle_path = None
+        df_preview = ""
+        dataset_uploaded = False
+
+        if data_file:
+            dataset_uploaded = True
+            filename = data_file.filename.lower()
+            content = await data_file.read()
+            from io import BytesIO
+
+            if filename.endswith(".csv"):
+                df = pd.read_csv(BytesIO(content))
+            elif filename.endswith((".xlsx", ".xls")):
+                df = pd.read_excel(BytesIO(content))
+            elif filename.endswith(".parquet"):
+                df = pd.read_parquet(BytesIO(content))
+            elif filename.endswith(".json"):
+                try:
+                    df = pd.read_json(BytesIO(content))
+                except ValueError:
+                    df = pd.DataFrame(json.loads(content.decode("utf-8")))
+            elif filename.endswith(".png") or filename.endswith(".jpg") or filename.endswith(".jpeg"):
+                try:
+                    if PIL_AVAILABLE:
+                        image = Image.open(BytesIO(content))
+                        image = image.convert("RGB")  # ensure RGB format
+                        df = pd.DataFrame({"image": [image]})
+                    else:
+                        raise HTTPException(400, "PIL not available for image processing")
+                except Exception as e:
+                    raise HTTPException(400, f"Image processing failed: {str(e)}")  
+            else:
+                raise HTTPException(400, f"Unsupported data file type: {filename}")
+
+            # Pickle for injection
+            temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
+            temp_pkl.close()
+            df.to_pickle(temp_pkl.name)
+            pickle_path = temp_pkl.name
+
+            df_preview = (
+                f"\n\nThe uploaded dataset has {len(df)} rows and {len(df.columns)} columns.\n"
+                f"Columns: {', '.join(df.columns.astype(str))}\n"
+                f"First rows:\n{df.head(5).to_markdown(index=False)}\n"
+            )
+
+        # Build rules based on data presence
+        if dataset_uploaded:
+            llm_rules = (
+                "Rules:\n"
+                "1) You have access to a pandas DataFrame called `df` and its dictionary form `data`.\n"
+                "2) DO NOT call scrape_url_to_dataframe() or fetch any external data.\n"
+                "3) Use only the uploaded dataset for answering questions.\n"
+                "4) Produce a final JSON object with keys:\n"
+                '   - "questions": [ ... original question strings ... ]\n'
+                '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
+                "5) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
+            )
+        else:
+            llm_rules = (
+                "Rules:\n"
+                "1) If you need web data, CALL scrape_url_to_dataframe(url).\n"
+                "2) Produce a final JSON object with keys:\n"
+                '   - "questions": [ ... original question strings ... ]\n'
+                '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
+                "3) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
+            )
+
+        llm_input = (
+            f"{llm_rules}\nQuestions:\n{raw_questions}\n"
+            f"{df_preview if df_preview else ''}"
+            "Respond with the JSON object only."
         )
 
+        # Run agent
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            fut = ex.submit(run_agent_safely_unified, llm_input, pickle_path)
+            try:
+                result = fut.result(timeout=LLM_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                raise HTTPException(408, "Processing timeout")
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def get_dashboard():
-    """Serves the interactive HTML dashboard."""
-    return HTMLResponse(content="""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8"/>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-      <title>TDS Data Analyst Agent</title>
-      <style>
-      * { margin:0; padding:0; box-sizing:border-box; }
-      body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color:#f5f5f5; background: linear-gradient(135deg,#1e1e2f 0%,#2a2a3d 100%); min-height:100vh; }
-      .container { max-width:1200px; margin:0 auto; padding:20px; }
-      .header { text-align:center; margin-bottom:30px; color:#fff; }
-      .header h1 { font-size:2.5rem; margin-bottom:10px; text-shadow:2px 2px 4px rgba(0,0,0,.6); }
-      .header p { font-size:1.1rem; opacity:.85; }
-      .main-card { background:#2c2c3e; border-radius:15px; box-shadow:0 10px 30px rgba(0,0,0,.4); padding:30px; margin-bottom:30px; }
-      .form-group { margin-bottom: 20px; }
-      .form-group label { display:block; margin-bottom:8px; font-weight:600; color:#ddd; }
-      .file-input-wrapper { position: relative; }
-      .file-input { width:100%; padding:15px; border:2px dashed #555; border-radius:8px; background:#1f1f2e; cursor:pointer; transition:.3s ease; text-align:center; color:#bbb; }
-      .file-input input[type="file"] { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
-      .file-input:hover { border-color:#667eea; background:#2a2a40; color:#fff; }
-      .file-info { margin-top:10px; padding:10px; background:#333; border-radius:5px; font-size:14px; color:#a8c7ff; display:none; }
-      .btn { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; border:none; padding:15px 30px; border-radius:8px; font-size:16px; font-weight:600; cursor:pointer; transition:.3s ease; width:100%; }
-      .btn:hover { transform:translateY(-2px); box-shadow:0 5px 15px rgba(102,126,234,.6); }
-      .btn:disabled { background:#555; cursor:not-allowed; transform:none; box-shadow:none; }
-      .btn-secondary { background:#444; color:#ddd; }
-      .button-group { display:flex; gap:10px; margin-top:20px; flex-wrap:wrap; }
-      .loading { display:none; text-align:center; padding:20px; flex-direction: column; justify-content: center; align-items: center;}
-      .spinner { border:4px solid #444; border-top:4px solid #667eea; border-radius:50%; width:40px; height:40px; animation:spin 1s linear infinite; margin:0 auto 15px; }
-      @keyframes spin { 0%{transform:rotate(0)} 100%{transform:rotate(360deg)} }
-      .results { display:none; margin-top:30px; }
-      .result-item { background:#1f1f2e; border-left:4px solid #667eea; padding:20px; margin-bottom:20px; border-radius:0 8px 8px 0; }
-      .question { font-weight:600; color:#fff; margin-bottom:15px; font-size:1.1rem; }
-      .answer { color:#ccc; line-height:1.6; }
-      .answer pre { background:#1a1a2a; color:#eee; padding: 15px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; }
-      .answer img { max-width:100%; height:auto; border-radius:8px; margin:10px 0; box-shadow:0 4px 8px rgba(0,0,0,.5); cursor:pointer; transition:transform .3s ease; }
-      .answer img:hover { transform:scale(1.02); }
-      .error { background:#3b1f1f; border-left-color:#dc3545; color:#ffb3b3; }
-      .modal { display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,.9); }
-      .modal-content { margin:auto; display:block; width:80%; max-width:700px; max-height:80%; object-fit:contain; }
-      .close { position:absolute; top:15px; right:35px; color:#f1f1f1; font-size:40px; font-weight:bold; cursor:pointer; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>🤖 TDS Data Analyst Agent</h1>
-          <p>Upload your questions and dataset to get intelligent answers with visualizations</p>
-        </div>
-        <div class="main-card">
-          <form id="analysisForm">
-            <div class="form-group">
-                <label for="questions_file">Questions File (.txt) <span style="color:#dc3545">*</span></label>
-                <div class="file-input-wrapper">
-                    <div class="file-input" id="questionsDrop">
-                        <input type="file" id="questions_file" name="questions.txt" accept=".txt" required/>
-                        <span>📁 Click to upload your questions (.txt)</span>
-                    </div>
-                </div>
-                <div id="questionsInfo" class="file-info"></div>
-            </div>
-            <div class="form-group">
-              <label for="data_file">Upload Dataset (Optional)</label>
-              <div class="file-input-wrapper">
-                <div class="file-input" id="dataDrop">
-                  <input type="file" id="data_file" name="data.csv" />
-                  <span>📁 Click or drag & drop your dataset</span>
-                </div>
-              </div>
-              <div id="dataInfo" class="file-info"></div>
-            </div>
-            <div class="button-group">
-              <button type="submit" class="btn" id="submitBtn">🚀 Analyze Data</button>
-              <button type="button" class="btn btn-secondary" id="clearBtn">🗑️ Clear</button>
-            </div>
-          </form>
-          <div class="loading" id="loading">
-            <div class="spinner"></div>
-            <p>Analyzing your data... This may take a moment.</p>
-          </div>
-          <div class="results" id="results">
-            <h3>📊 Analysis Results</h3>
-            <div id="resultsContent"></div>
-          </div>
-        </div>
-      </div>
-      <div id="imageModal" class="modal">
-        <span class="close">&times;</span>
-        <img class="modal-content" id="modalImage" alt="Visualization"/>
-      </div>
-      <script>
-        class DataAnalystApp {
-          constructor() {
-            this.form = document.getElementById('analysisForm');
-            this.qFileInput = document.getElementById('questions_file');
-            this.dFileInput = document.getElementById('data_file');
-            this.qInfo = document.getElementById('questionsInfo');
-            this.dInfo = document.getElementById('dataInfo');
-            this.submitBtn = document.getElementById('submitBtn');
-            this.clearBtn = document.getElementById('clearBtn');
-            this.loading = document.getElementById('loading');
-            this.resultsContent = document.getElementById('resultsContent');
-            this.resultsContainer = document.getElementById('results');
-            this.modal = document.getElementById('imageModal');
-            this.modalImage = document.getElementById('modalImage');
-            this.initEventListeners();
-          }
-          initEventListeners() {
-            this.form.addEventListener('submit', (e) => this.handleSubmit(e));
-            this.clearBtn.addEventListener('click', () => this.clearForm());
-            this.qFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.qInfo, 'Questions'));
-            this.dFileInput.addEventListener('change', (e) => this.handleFileSelect(e, this.dInfo, 'Dataset'));
-            document.querySelector('.close').addEventListener('click', () => this.hideImageModal());
-          }
-          handleFileSelect(event, infoEl, label) {
-            const files = event.target.files;
-            if (files.length > 0) {
-              const fileNames = Array.from(files).map(f => `${f.name} (${(f.size/1024).toFixed(2)} KB)`).join(', ');
-              infoEl.innerHTML = `<strong>${label}:</strong> ${fileNames}`;
-              infoEl.style.display = 'block';
-            } else {
-              infoEl.style.display = 'none';
-            }
-          }
-          async handleSubmit(event) {
-            event.preventDefault();
-            this.showLoading(true);
-            try {
-                const formData = new FormData(this.form);
-                const response = await fetch('/api/', { // Corrected to /api/
-                    method: 'POST',
-                    body: formData
-                });
-                
-                if (!response.ok) {
-                    let errorDetail = `HTTP Error: ${response.status} ${response.statusText}`;
-                    try {
-                        const errorJson = await response.json();
-                        errorDetail = errorJson.detail || JSON.stringify(errorJson);
-                    } catch (jsonError) {
-                        // The error response was not JSON, do nothing
-                    }
-                    throw new Error(errorDetail);
-                }
+        if "error" in result:
+            raise HTTPException(500, detail=result["error"])
 
-                const data = await response.json();
-                this.displayResults(data);
+        # Post-process key mapping & type casting
+        if keys_list and type_map:
+            mapped = {}
+            for idx, q in enumerate(result.keys()):
+                if idx < len(keys_list):
+                    key = keys_list[idx]
+                    caster = type_map.get(key, str)
+                    try:
+                        val = result[q]
+                        if isinstance(val, str) and val.startswith("data:image/"):
+                            # Remove data URI prefix
+                            val = val.split(",", 1)[1] if "," in val else val
+                        mapped[key] = caster(val) if val not in (None, "") else val
+                    except Exception:
+                        mapped[key] = result[q]
+            result = mapped
 
-            } catch (err) {
-                this.displayError(err.message);
-            } finally {
-                this.showLoading(false);
-            }
-          }
-          displayResults(data) {
-            this.resultsContent.innerHTML = '';
-            const isError = data.error || (Array.isArray(data) && data.length === 0);
-            if (isError) {
-              this.displayError(data.error || 'The agent returned an empty or invalid result.');
-              return;
-            }
-            const entries = Array.isArray(data) ? data.map((item, i) => [`Answer ${i + 1}`, item]) : Object.entries(data);
-            entries.forEach(([key, value]) => {
-              const item = this.createResultItem(key, value);
-              this.resultsContent.appendChild(item);
-            });
-            this.resultsContainer.style.display = 'block';
-          }
-          displayError(message) {
-            this.resultsContent.innerHTML = '';
-            const item = this.createResultItem('❌ Error', message, true);
-            this.resultsContent.appendChild(item);
-            this.resultsContainer.style.display = 'block';
-          }
-          createResultItem(key, value, isError = false) {
-            const item = document.createElement('div');
-            item.className = isError ? 'result-item error' : 'result-item';
-            const keyDiv = document.createElement('div');
-            keyDiv.className = 'question';
-            keyDiv.textContent = key.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
-            const valueDiv = document.createElement('div');
-            valueDiv.className = 'answer';
-            const maybeImg = (typeof value === 'string' && value.startsWith('data:image/')) ? value : null;
-            if (maybeImg) {
-              const img = document.createElement('img');
-              img.src = maybeImg;
-              img.onclick = () => this.showImageModal(maybeImg);
-              valueDiv.appendChild(img);
-            } else {
-              const text = (value && typeof value === 'object') ? JSON.stringify(value, null, 2) : String(value ?? 'N/A');
-              const pre = document.createElement('pre');
-              pre.textContent = text;
-              valueDiv.appendChild(pre);
-            }
-            item.appendChild(keyDiv);
-            item.appendChild(valueDiv);
-            return item;
-          }
-          showImageModal(src) { this.modalImage.src = src; this.modal.style.display = 'block'; }
-          hideImageModal() { this.modal.style.display = 'none'; }
-          showLoading(isLoading) {
-            this.loading.style.display = isLoading ? 'flex' : 'none';
-            this.submitBtn.disabled = isLoading;
-            this.submitBtn.innerHTML = isLoading ? '⏳ Analyzing...' : '🚀 Analyze Data';
-          }
-          clearForm() {
-            this.form.reset();
-            this.qInfo.style.display = 'none';
-            this.dInfo.style.display = 'none';
-            this.resultsContainer.style.display = 'none';
-            this.resultsContent.innerHTML = '';
-          }
-        }
-        document.addEventListener('DOMContentLoaded', () => { new DataAnalystApp(); });
-      </script>
-    </body>
-    </html>
-    """)
+        return JSONResponse(content=result)
 
-@app.head("/")
-async def head_root():
-    """Handles HEAD requests for health checks."""
-    return Response(status_code=200)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.exception("analyze_data failed")
+        raise HTTPException(500, detail=str(e))
 
-# ==============================================================================
-# 4. APPLICATION RUNNER
-# ==============================================================================
+
+def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
+    """
+    Runs the LLM agent and executes code.
+    - Retries up to 3 times if agent returns no output.
+    - If pickle_path is provided, injects that DataFrame directly.
+    - If no pickle_path, falls back to scraping when needed.
+    """
+    try:
+        max_retries = 3
+        raw_out = ""
+        for attempt in range(1, max_retries + 1):
+            response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
+            raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
+            if raw_out:
+                break
+        if not raw_out:
+            return {"error": f"Agent returned no output after {max_retries} attempts"}
+
+        parsed = clean_llm_output(raw_out)
+        if "error" in parsed:
+            return parsed
+
+        if "code" not in parsed or "questions" not in parsed:
+            return {"error": f"Invalid agent response: {parsed}"}
+
+        code = parsed["code"]
+        questions = parsed["questions"]
+
+        if pickle_path is None:
+            urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
+            if urls:
+                url = urls[0]
+                tool_resp = scrape_url_to_dataframe(url)
+                if tool_resp.get("status") != "success":
+                    return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
+                df = pd.DataFrame(tool_resp["data"])
+                temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
+                temp_pkl.close()
+                df.to_pickle(temp_pkl.name)
+                pickle_path = temp_pkl.name
+
+        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
+        if exec_result.get("status") != "success":
+            return {"error": f"Execution failed: {exec_result.get('message')}", "raw": exec_result.get("raw")}
+
+        results_dict = exec_result.get("result", {})
+        return {q: results_dict.get(q, "Answer not found") for q in questions}
+
+    except Exception as e:
+        logger.exception("run_agent_safely_unified failed")
+        return {"error": str(e)}
+
+
+    
+from fastapi.responses import FileResponse, Response
+import base64, os
+
+# 1×1 transparent PNG fallback (if favicon.ico file not present)
+_FAVICON_FALLBACK_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII="
+)
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """
+    Serve favicon.ico if present in the working directory.
+    Otherwise return a tiny transparent PNG to avoid 404s.
+    """
+    path = "favicon.ico"
+    if os.path.exists(path):
+        return FileResponse(path, media_type="image/x-icon")
+    return Response(content=_FAVICON_FALLBACK_PNG, media_type="image/png")
+
+@app.get("/api", include_in_schema=False)
+async def analyze_get_info():
+    """Health/info endpoint. Use POST /api for actual analysis."""
+    return JSONResponse({
+        "ok": True,
+        "message": "Server is running. Use POST /api with 'questions_file' and optional 'data_file'.",
+
+    })
+
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8080"))
-    logging.info(f"🚀 Starting server on http://0.0.0.0:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
