@@ -522,6 +522,7 @@ def run_agent_safely(llm_input: str) -> Dict:
 
 from fastapi import Request
 
+@app.post("/")
 @app.post("/api/")
 @app.post("/api")
 async def analyze_data(request: Request):
