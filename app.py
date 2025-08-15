@@ -27,7 +27,6 @@ from fastapi import FastAPI
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 
-
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -435,7 +434,7 @@ You must:
 5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
 6. Your Python code will run in a sandbox with:
    - pandas, numpy, matplotlib, networkx available
-   - A helper function `plot_to_base64()` for generating base64-encoded images under 100KB.
+   - A helper function `plot_to_base64()` for generating base64-encoded images under 100KB. DO NOT import it.
 7. For plots, always use `plot_to_base64()` and return a raw base64 string (no data URI).
 8. All numeric values in the final `results` dict must be actual numbers (int/float), not strings.
 9. Round all floating-point numbers to 2 decimal places.
@@ -454,7 +453,7 @@ agent_executor = AgentExecutor(
     agent=agent,
     tools=[scrape_url_to_dataframe],
     verbose=True,
-    max_iterations=4,
+    max_iterations=5,
     early_stopping_method="generate",
     handle_parsing_errors=lambda e: f"Output parsing error: {e}",
     return_intermediate_steps=False
@@ -559,7 +558,7 @@ async def analyze_data(request: Request):
                 raise HTTPException(408, "Processing timeout")
 
         if "error" in result:
-            raise HTTPException(500, detail=result["error"])
+            raise HTTPException(500, detail=f"Agent execution failed: {result['error']}")
 
         # Post-process to ensure correct types
         final_result = {}
