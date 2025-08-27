@@ -414,6 +414,16 @@ agent = create_tool_calling_agent(
     prompt=prompt
 )
 
+agent_executor = AgentExecutor.from_agent_and_tools(
+    agent=agent,
+    tools=tools,
+    verbose=True,
+    max_iterations=5,
+    handle_parsing_errors=lambda e: f"Output parsing error: {e}",
+    return_intermediate_steps=False,
+)
+
+
 # -----------------------------
 # Runner
 # -----------------------------
