@@ -374,26 +374,19 @@ tools = [scrape_url_to_dataframe]
 
 # Prompt: instruct agent to call the tool and output JSON only
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a full-stack autonomous data analyst agent.
+    ("system", """You are a data analyst agent. You write Python code to answer questions.
 
-You will receive:
-- A set of **rules** for this request
-- A **task description** which includes questions and required JSON keys
-- An optional **dataset preview**
-
-You must:
-1. Follow the provided rules exactly.
-2. Return only a valid JSON object — no extra commentary or formatting.
-3. The JSON must contain a single key: "code".
-4. The value of "code" must be a Python script that populates a dictionary called `results`.
-5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
-6. Your Python code will run in a sandbox with:
-   - pandas, numpy, matplotlib, networkx available
-   - A helper function `plot_to_base64()` (called with no arguments) for generating base64-encoded images. DO NOT import or define it.
-   - A helper function `scrape_url_to_dataframe(url)` for fetching data. DO NOT import or define it.
-7. For plots, always use `plot_to_base64()` and return a raw base64 string (no data URI).
-8. All numeric values in the final `results` dict must be actual numbers (int/float), not strings.
-9. When processing scraped data, be robust. Check if expected columns (e.g., 'revenue') exist before accessing them. If not, handle it gracefully.
+**RULES:**
+1. You will be given a task, and optionally a dataset.
+2. Your response MUST be a single JSON object with one key: "code".
+3. The value of "code" must be a Python script.
+4. The script MUST populate a dictionary named `results`. The keys of this dictionary must match the snake_case identifiers in the task description.
+5. **CRITICAL RULE: You MUST ONLY use the data provided (either from the `df` variable or by calling the `scrape_url_to_dataframe` function). DO NOT invent, hallucinate, or synthesize data under any circumstances.**
+6. If a question cannot be answered from the available data, the value for that key in the `results` dictionary MUST be the string "Not applicable".
+7. The following functions are available in the execution environment. DO NOT redefine or import them:
+   - `scrape_url_to_dataframe(url: str) -> dict`: Fetches data from a URL.
+   - `plot_to_base64() -> str`: Converts the current matplotlib plot to a base64 string.
+8. Your code must not contain any import statements other than for pandas, numpy, and matplotlib.
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
