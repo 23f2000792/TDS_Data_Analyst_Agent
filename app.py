@@ -232,115 +232,18 @@ def clean_llm_output(output: str) -> Dict:
 
 def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
     """
-    Write a temp python file which:
-      - provides a safe environment (imports)
-      - loads df/from pickle if provided into df and data variables
-      - defines a robust plot_to_base64() helper that ensures < 100kB (attempts resizing/conversion)
-      - executes the user code (which should populate `results` dict)
-      - prints json.dumps({"status":"success","result":results})
-    Returns dict with parsed JSON or error details.
+    Writes and executes a Python script in a temporary file.
+    The script is expected to print a JSON object to stdout.
     """
-    # create file content
-    preamble = [
-        "import json, sys, gc, traceback",
-        "import pandas as pd, numpy as np",
-        "import matplotlib",
-        "matplotlib.use('Agg')",
-        "import matplotlib.pyplot as plt",
-        "import networkx as nx",
-        "from io import BytesIO",
-        "import base64",
-        "from typing import Dict, Any, List"
-    ]
-    if PIL_AVAILABLE:
-        preamble.append("from PIL import Image")
-    # inject df if a pickle path provided
-    if injected_pickle:
-        preamble.append(f"df = pd.read_pickle(r'''{injected_pickle}''')\n")
-        preamble.append("data = df.to_dict(orient='records')\n")
-    else:
-        # ensure data exists so user code that references data won't break
-        preamble.append("data = globals().get('data', {})\n")
-
-    # plot_to_base64 helper that tries to reduce size under 100_000 bytes
-    helper = r'''
-def plot_to_base64(max_bytes=100000):
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
-    buf.seek(0)
-    img_bytes = buf.getvalue()
-    if len(img_bytes) <= max_bytes:
-        return base64.b64encode(img_bytes).decode('ascii')
-    # try decreasing dpi/figure size iteratively
-    for dpi in [80, 60, 50, 40, 30]:
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
-        buf.seek(0)
-        b = buf.getvalue()
-        if len(b) <= max_bytes:
-            return base64.b64encode(b).decode('ascii')
-    # if Pillow available, try convert to WEBP which is typically smaller
-    try:
-        from PIL import Image
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
-        buf.seek(0)
-        im = Image.open(buf)
-        out_buf = BytesIO()
-        im.save(out_buf, format='WEBP', quality=80, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
-        if len(ob) <= max_bytes:
-            return base64.b64encode(ob).decode('ascii')
-        # try lower quality
-        out_buf = BytesIO()
-        im.save(out_buf, format='WEBP', quality=60, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
-        if len(ob) <= max_bytes:
-            return base64.b64encode(ob).decode('ascii')
-    except Exception:
-        pass
-    # as last resort return downsized PNG even if > max_bytes
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
-    buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode('ascii')
-'''
-    
-    # Wrap agent code in a try/except block for guaranteed output
-    wrapped_code = f"""
-results = {{}}
-try:
-    {code}
-    print(json.dumps({{'status':'success','result':results}}, default=str), flush=True)
-except Exception as e:
-    error_str = traceback.format_exc()
-    print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
-"""
-
-    script_lines = []
-    script_lines.extend(preamble)
-    script_lines.append("\n# Injected scrape_url_to_dataframe\n")
-    script_lines.append(inspect.getsource(scrape_url_to_dataframe.func).replace("@tool", ""))
-    script_lines.append(helper)
-    script_lines.append(wrapped_code)
-    
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
-    tmp.write("\n".join(script_lines))
-    tmp.flush(); tmp_path = tmp.name; tmp.close()
+    # Inject pickle path if provided
+    if injected_pickle:
+        code = f"df = pd.read_pickle(r'''{injected_pickle}''')\n" + code
+        
+    tmp.write(code)
+    tmp.flush()
+    tmp_path = tmp.name
+    tmp.close()
 
     try:
         completed = subprocess.run([sys.executable, tmp_path],
@@ -348,8 +251,6 @@ except Exception as e:
         
         out = completed.stdout.strip()
         if not out:
-            # If stdout is empty, there was a catastrophic error before JSON could be printed.
-            # Return stderr instead.
             return {"status": "error", "message": completed.stderr.strip() or "Unknown execution error"}
 
         try:
@@ -390,15 +291,12 @@ prompt = ChatPromptTemplate.from_messages([
 **RULES:**
 1. You will be given a task, and optionally a dataset.
 2. Your response MUST be a single JSON object with one key: "code".
-3. The value of "code" must be a Python script that populates a dictionary named `results`.
-4. The script MUST NOT contain a `return` statement. It should only populate the `results` dictionary.
-5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
+3. The value of "code" must be a COMPLETE and VALID Python script.
+4. The script MUST populate a dictionary named `results`. The keys of this dictionary must match the snake_case identifiers in the task description.
+5. The script MUST end with the line: `print(json.dumps({'status':'success','result':results}, default=str), flush=True)`
 6. **CRITICAL RULE: You MUST ONLY use the data provided (either from the `df` variable or by calling the `scrape_url_to_dataframe` function). DO NOT invent, hallucinate, or synthesize data under any circumstances.**
 7. If a question cannot be answered from the available data, the value for that key in the `results` dictionary MUST be the string "Not applicable".
-8. The following functions are available in the execution environment. DO NOT redefine or import them:
-   - `scrape_url_to_dataframe(url: str) -> dict`: Fetches data from a URL.
-   - `plot_to_base64() -> str`: Converts the current matplotlib plot to a base64 string.
-9. Your code must not contain any import statements other than for pandas, numpy, and matplotlib.
+8. Your code MUST include all necessary imports (e.g., pandas, numpy, matplotlib, base64, io, etc.).
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
