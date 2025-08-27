@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import io
 import os
-import inspect
 import re
 import json
 import base64
@@ -304,20 +303,21 @@ def plot_to_base64(max_bytes=100000):
     buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
-    
+
+    # Build the code to write
     script_lines = []
     script_lines.extend(preamble)
-    script_lines.append("\n# Injected scrape_url_to_dataframe\n")
-    script_lines.append(inspect.getsource(scrape_url_to_dataframe))
     script_lines.append(helper)
     script_lines.append("\nresults = {}\n")
-    safe_code = code.replace("from functions import scrape_url_to_dataframe", "")
-    script_lines.append(safe_code)
+    script_lines.append(code)
+    # ensure results printed as json
     script_lines.append("\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n")
-    
+
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
     tmp.write("\n".join(script_lines))
-    tmp.flush(); tmp_path = tmp.name; tmp.close()
+    tmp.flush()
+    tmp_path = tmp.name
+    tmp.close()
 
     try:
         completed = subprocess.run([sys.executable, tmp_path],
@@ -398,8 +398,9 @@ agent_executor = AgentExecutor(
     return_intermediate_steps=False
 )
 
+
 # -----------------------------
-# Runner
+# Runner: orchestrates agent -> pre-scrape inject -> execute
 # -----------------------------
 @app.post("/")
 @app.post("/api/")
@@ -551,7 +552,7 @@ async def favicon():
     """
     path = "favicon.ico"
     if os.path.exists(path):
-        return FileResponse(path, media_type="image/x-icon")
+        return FileResponse(path, media_type="image-x-icon")
     return Response(content=_FAVICON_FALLBACK_PNG, media_type="image/png")
 
 @app.get("/api", include_in_schema=False)
