@@ -242,7 +242,7 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
     """
     # create file content
     preamble = [
-        "import json, sys, gc",
+        "import json, sys, gc, traceback",
         "import pandas as pd, numpy as np",
         "import matplotlib",
         "matplotlib.use('Agg')",
@@ -320,15 +320,27 @@ def plot_to_base64(max_bytes=100000):
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
     
+    # Wrap agent code in a function and a try/except block for guaranteed output
+    wrapped_code = f"""
+def agent_code():
+    results = {{}}
+    {code}
+    return results
+
+try:
+    final_results = agent_code()
+    print(json.dumps({{'status':'success','result':final_results}}, default=str), flush=True)
+except Exception as e:
+    error_str = traceback.format_exc()
+    print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
+"""
+
     script_lines = []
     script_lines.extend(preamble)
     script_lines.append("\n# Injected scrape_url_to_dataframe\n")
     script_lines.append(inspect.getsource(scrape_url_to_dataframe.func).replace("@tool", ""))
     script_lines.append(helper)
-    script_lines.append("\nresults = {}\n")
-    safe_code = code.replace("from functions import scrape_url_to_dataframe", "")
-    script_lines.append(safe_code)
-    script_lines.append("\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n")
+    script_lines.append(wrapped_code)
     
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
     tmp.write("\n".join(script_lines))
@@ -337,16 +349,19 @@ def plot_to_base64(max_bytes=100000):
     try:
         completed = subprocess.run([sys.executable, tmp_path],
                                      capture_output=True, text=True, timeout=timeout)
-        if completed.returncode != 0:
-            # collect stderr and stdout for debugging
-            return {"status": "error", "message": completed.stderr.strip() or completed.stdout.strip()}
-        # parse stdout as json
+        
         out = completed.stdout.strip()
+        if not out:
+            # If stdout is empty, there was a catastrophic error before JSON could be printed.
+            # Return stderr instead.
+            return {"status": "error", "message": completed.stderr.strip() or "Unknown execution error"}
+
         try:
             parsed = json.loads(out)
             return parsed
         except Exception as e:
             return {"status": "error", "message": f"Could not parse JSON output: {str(e)}", "raw": out}
+            
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": "Execution timed out"}
     finally:
@@ -363,7 +378,7 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    model=os.getenv("OPENAI_MODEL", "o3-mini"),
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
