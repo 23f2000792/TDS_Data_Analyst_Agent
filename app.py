@@ -363,7 +363,7 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "o3-mini"),
+    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
