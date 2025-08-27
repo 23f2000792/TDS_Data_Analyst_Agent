@@ -402,6 +402,7 @@ agent_executor = AgentExecutor(
 # -----------------------------
 # Runner: orchestrates agent -> pre-scrape inject -> execute
 # -----------------------------
+@app.post("/")
 @app.post("/api/")
 @app.post("/api")
 async def analyze_data(request: Request):
