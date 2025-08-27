@@ -308,7 +308,7 @@ def plot_to_base64(max_bytes=100000):
     script_lines = []
     script_lines.extend(preamble)
     script_lines.append("\n# Injected scrape_url_to_dataframe\n")
-    script_lines.append(inspect.getsource(scrape_url_to_dataframe.func))
+    script_lines.append(inspect.getsource(scrape_url_to_dataframe.func).replace("@tool", ""))
     script_lines.append(helper)
     script_lines.append("\nresults = {}\n")
     safe_code = code.replace("from functions import scrape_url_to_dataframe", "")
