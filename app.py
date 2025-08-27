@@ -215,65 +215,6 @@ def clean_llm_output(output: str) -> Dict:
     except Exception as e:
         return {"error": str(e)}
 
-SCRAPE_FUNC = r'''
-from typing import Dict, Any
-import requests
-from bs4 import BeautifulSoup
-import pandas as pd
-import re
-
-def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
-    try:
-        response = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=5
-        )
-        response.raise_for_status()
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e),
-            "data": [],
-            "columns": []
-        }
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    tables = pd.read_html(response.text)
-
-    if tables:
-        df = tables[0]  # Take first table
-        df.columns = [str(c).strip() for c in df.columns]
-        
-        # Ensure all columns are unique and string
-        df.columns = [str(col) for col in df.columns]
-
-        return {
-            "status": "success",
-            "data": df.to_dict(orient="records"),
-            "columns": list(df.columns)
-        }
-    else:
-        # Fallback to plain text
-        text_data = soup.get_text(separator="\n", strip=True)
-
-        # Try to detect possible "keys" from text like Runtime, Genre, etc.
-        detected_cols = set(re.findall(r"\b[A-Z][a-zA-Z ]{2,15}\b", text_data))
-        df = pd.DataFrame([{}])  # start empty
-        for col in detected_cols:
-            df[col] = None
-
-        if df.empty:
-            df["text"] = [text_data]
-
-        return {
-            "status": "success",
-            "data": df.to_dict(orient="records"),
-            "columns": list(df.columns)
-        }
-'''
-
-
 def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
     """
     Write a temp python file which:
@@ -367,7 +308,6 @@ def plot_to_base64(max_bytes=100000):
     script_lines = []
     script_lines.extend(preamble)
     script_lines.append(helper)
-    script_lines.append(SCRAPE_FUNC)
     script_lines.append("\nresults = {}\n")
     script_lines.append(code)
     # ensure results printed as json
@@ -415,7 +355,7 @@ llm = ChatOpenAI(
 
 
 # Tools list for agent (LangChain tool decorator returns metadata for the LLM)
-tools = [scrape_url_to_dataframe]  # we only expose scraping as a tool; agent will still produce code
+tools = [scrape_url_to_dataframe]
 
 # Prompt: instruct agent to call the tool and output JSON only
 prompt = ChatPromptTemplate.from_messages([
@@ -434,10 +374,9 @@ You must:
 5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
 6. Your Python code will run in a sandbox with:
    - pandas, numpy, matplotlib, networkx available
-   - A helper function `plot_to_base64()` for generating base64-encoded images under 100KB. DO NOT import it.
+   - A helper function `plot_to_base64()` (called with no arguments) for generating base64-encoded images. DO NOT import or define it.
 7. For plots, always use `plot_to_base64()` and return a raw base64 string (no data URI).
 8. All numeric values in the final `results` dict must be actual numbers (int/float), not strings.
-9. Round all floating-point numbers to 2 decimal places.
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -445,13 +384,13 @@ You must:
 
 agent = create_tool_calling_agent(
     llm=llm,
-    tools=[scrape_url_to_dataframe],
+    tools=tools,
     prompt=prompt
 )
 
 agent_executor = AgentExecutor(
     agent=agent,
-    tools=[scrape_url_to_dataframe],
+    tools=tools,
     verbose=True,
     max_iterations=5,
     early_stopping_method="generate",
@@ -459,11 +398,10 @@ agent_executor = AgentExecutor(
     return_intermediate_steps=False
 )
 
+
 # -----------------------------
 # Runner: orchestrates agent -> pre-scrape inject -> execute
 # -----------------------------
-
-@app.post("/")
 @app.post("/api/")
 @app.post("/api")
 async def analyze_data(request: Request):
@@ -549,26 +487,36 @@ async def analyze_data(request: Request):
             "Respond with the JSON object only."
         )
 
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as ex:
-            fut = ex.submit(run_agent_safely_unified, llm_input, pickle_path)
-            try:
-                result = fut.result(timeout=LLM_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                raise HTTPException(408, "Processing timeout")
+        # Run agent
+        response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
+        raw_out = response.get("output") or ""
+        if not raw_out or "code" not in raw_out:
+             raise HTTPException(500, detail=f"Agent returned no usable output. Last response: {raw_out}")
 
-        if "error" in result:
-            raise HTTPException(500, detail=f"Agent execution failed: {result['error']}")
+        parsed = clean_llm_output(raw_out)
+        if "error" in parsed:
+            raise HTTPException(500, detail=f"Could not parse agent output: {parsed['error']}")
+
+        if "code" not in parsed:
+             raise HTTPException(500, detail=f"Invalid agent response: 'code' key missing. Response: {parsed}")
+        
+        code = parsed["code"]
+
+        # Execute the code
+        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
+        if exec_result.get("status") != "success":
+            raise HTTPException(500, detail=f"Execution failed: {exec_result.get('message')}")
+
+        results_dict = exec_result.get("result", {})
 
         # Post-process to ensure correct types
         final_result = {}
         for key in keys_list:
-            if key in result:
+            if key in results_dict:
                 caster = type_map.get(key, str)
                 try:
-                    val = result[key]
+                    val = results_dict[key]
                     if isinstance(val, str) and caster != str:
-                         # Avoid casting base64 strings
                         if not val.startswith(('iVBO', '/9j/')):
                             final_result[key] = caster(val)
                         else:
@@ -576,9 +524,9 @@ async def analyze_data(request: Request):
                     else:
                         final_result[key] = caster(val)
                 except (ValueError, TypeError):
-                    final_result[key] = result[key] # Keep original if cast fails
+                    final_result[key] = results_dict[key]
             else:
-                 final_result[key] = None # Or some default value
+                 final_result[key] = None
 
         return JSONResponse(content=final_result)
 
@@ -587,57 +535,6 @@ async def analyze_data(request: Request):
     except Exception as e:
         logger.exception("analyze_data failed")
         raise HTTPException(500, detail=str(e))
-
-
-def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
-    """
-    Runs the LLM agent and executes code.
-    """
-    try:
-        max_retries = 2
-        raw_out = ""
-        for attempt in range(1, max_retries + 1):
-            response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
-            raw_out = response.get("output") or ""
-            if raw_out and "code" in raw_out:
-                break
-        if not raw_out:
-            return {"error": f"Agent returned no usable output after {max_retries} attempts. Last response: {raw_out}"}
-
-        parsed = clean_llm_output(raw_out)
-        if "error" in parsed:
-            return parsed
-
-        if "code" not in parsed:
-            return {"error": f"Invalid agent response: 'code' key missing. Response: {parsed}"}
-
-        code = parsed["code"]
-        
-        if pickle_path is None:
-            urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
-            if urls:
-                url = urls[0]
-                tool_resp = scrape_url_to_dataframe.invoke(url)
-                if tool_resp.get("status") != "success":
-                    return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
-                df = pd.DataFrame(tool_resp["data"])
-                temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
-                temp_pkl.close()
-                df.to_pickle(temp_pkl.name)
-                pickle_path = temp_pkl.name
-
-        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
-        if exec_result.get("status") != "success":
-            return {"error": f"Execution failed: {exec_result.get('message')}", "raw": exec_result.get("raw")}
-
-        results_dict = exec_result.get("result", {})
-        return results_dict
-
-    except Exception as e:
-        logger.exception("run_agent_safely_unified failed")
-        return {"error": str(e)}
-
-
     
 from fastapi.responses import FileResponse, Response
 import base64, os
