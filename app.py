@@ -236,11 +236,11 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
       - provides a safe environment (imports)
       - loads df/from pickle if provided into df and data variables
       - defines a robust plot_to_base64() helper that ensures < 100kB (attempts resizing/conversion)
-      - executes the user code (which should populate `results` dict)
-      - prints json.dumps({"status":"success","result":results})
+      - executes the user code (which should populate `results` dict) inside a try...finally block
+      - prints json.dumps({"status":"success","result":results}) from a finally block to GUARANTEE output.
     Returns dict with parsed JSON or error details.
     """
-    # create file content
+    # ... (the preamble and helper strings remain the same) ...
     preamble = [
         "import json, sys, gc",
         "import pandas as pd, numpy as np",
@@ -254,68 +254,52 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
     ]
     if PIL_AVAILABLE:
         preamble.append("from PIL import Image")
-    # inject df if a pickle path provided
+    
     if injected_pickle:
         preamble.append(f"df = pd.read_pickle(r'''{injected_pickle}''')\n")
         preamble.append("data = df.to_dict(orient='records')\n")
     else:
-        # ensure data exists so user code that references data won't break
         preamble.append("data = globals().get('data', {})\n")
 
-    # plot_to_base64 helper that tries to reduce size under 100_000 bytes
     helper = r'''
 def plot_to_base64(max_bytes=100000):
+    # ... (function content is unchanged) ...
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
+    plt.clf(); plt.close('all'); gc.collect()
     buf.seek(0)
     img_bytes = buf.getvalue()
     if len(img_bytes) <= max_bytes:
         return base64.b64encode(img_bytes).decode('ascii')
-    # try decreasing dpi/figure size iteratively
     for dpi in [80, 60, 50, 40, 30]:
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
-        buf.seek(0)
-        b = buf.getvalue()
+        plt.clf(); plt.close('all'); gc.collect()
+        buf.seek(0); b = buf.getvalue()
         if len(b) <= max_bytes:
             return base64.b64encode(b).decode('ascii')
-    # if Pillow available, try convert to WEBP which is typically smaller
     try:
         from PIL import Image
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
+        plt.clf(); plt.close('all'); gc.collect()
         buf.seek(0)
         im = Image.open(buf)
         out_buf = BytesIO()
         im.save(out_buf, format='WEBP', quality=80, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
+        out_buf.seek(0); ob = out_buf.getvalue()
         if len(ob) <= max_bytes:
             return base64.b64encode(ob).decode('ascii')
-        # try lower quality
         out_buf = BytesIO()
         im.save(out_buf, format='WEBP', quality=60, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
+        out_buf.seek(0); ob = out_buf.getvalue()
         if len(ob) <= max_bytes:
             return base64.b64encode(ob).decode('ascii')
     except Exception:
         pass
-    # as last resort return downsized PNG even if > max_bytes
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
+    plt.clf(); plt.close('all'); gc.collect()
     buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
@@ -326,27 +310,57 @@ def plot_to_base64(max_bytes=100000):
     script_lines.append(inspect.getsource(scrape_url_to_dataframe.func).replace("@tool", ""))
     script_lines.append(helper)
     script_lines.append("\nresults = {}\n")
+
+    # ------------------
+    #  START OF FIX
+    # ------------------
     safe_code = code.replace("from functions import scrape_url_to_dataframe", "")
-    script_lines.append(safe_code)
-    script_lines.append("\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n")
+    
+    # Wrap the user-generated code in a try...finally block
+    # This ensures the print statement is always executed, even if the code calls sys.exit()
+    script_lines.append("try:")
+    # Indent the user's code to place it inside the try block
+    indented_safe_code = "    " + safe_code.replace('\n', '\n    ')
+    script_lines.append(indented_safe_code)
+    script_lines.append("finally:")
+    # The crucial print statement is now in the finally block
+    script_lines.append("    print(json.dumps({'status':'success','result':results}, default=str), flush=True)")
+
+    # ------------------
+    #  END OF FIX
+    # ------------------
     
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
     tmp.write("\n".join(script_lines))
     tmp.flush(); tmp_path = tmp.name; tmp.close()
 
     try:
-        completed = subprocess.run([sys.executable, tmp_path],
-                                     capture_output=True, text=True, timeout=timeout)
+        completed = subprocess.run(
+            [sys.executable, tmp_path],
+            capture_output=True, text=True, timeout=timeout
+        )
+        
+        # ------------------
+        #  IMPROVED ERROR REPORTING
+        # ------------------
         if completed.returncode != 0:
-            # collect stderr and stdout for debugging
-            return {"status": "error", "message": completed.stderr.strip() or completed.stdout.strip()}
-        # parse stdout as json
+            error_message = (
+                f"STDERR:\n{completed.stderr.strip()}\n\n"
+                f"STDOUT:\n{completed.stdout.strip()}"
+            ).strip()
+            return {"status": "error", "message": error_message or "Subprocess failed with no output."}
+
         out = completed.stdout.strip()
+        # This check is now robust because the finally block guarantees 'out' is populated.
+        if not out:
+             return {"status": "error", "message": "Execution produced no output.", "raw_stderr": completed.stderr.strip()}
+
         try:
             parsed = json.loads(out)
             return parsed
         except Exception as e:
             return {"status": "error", "message": f"Could not parse JSON output: {str(e)}", "raw": out}
+            
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": "Execution timed out"}
     finally:
