@@ -394,14 +394,15 @@ prompt = ChatPromptTemplate.from_messages([
 **RULES:**
 1. You will be given a task, and optionally a dataset.
 2. Your response MUST be a single JSON object with one key: "code".
-3. The value of "code" must be the body of a Python function that populates a dictionary named `results` and returns it.
-4. The `results` dictionary keys must EXACTLY match the snake_case identifiers in the task description.
-5. **CRITICAL RULE: You MUST ONLY use the data provided (either from the `df` variable or by calling the `scrape_url_to_dataframe` function). DO NOT invent, hallucinate, or synthesize data under any circumstances.**
-6. If a question cannot be answered from the available data, the value for that key in the `results` dictionary MUST be the string "Not applicable".
-7. The following functions are available in the execution environment. DO NOT redefine or import them:
+3. The value of "code" must be a Python script that populates a dictionary named `results`.
+4. The script MUST NOT contain a `return` statement. It should only populate the `results` dictionary.
+5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
+6. **CRITICAL RULE: You MUST ONLY use the data provided (either from the `df` variable or by calling the `scrape_url_to_dataframe` function). DO NOT invent, hallucinate, or synthesize data under any circumstances.**
+7. If a question cannot be answered from the available data, the value for that key in the `results` dictionary MUST be the string "Not applicable".
+8. The following functions are available in the execution environment. DO NOT redefine or import them:
    - `scrape_url_to_dataframe(url: str) -> dict`: Fetches data from a URL.
    - `plot_to_base64() -> str`: Converts the current matplotlib plot to a base64 string.
-8. Your code must not contain any import statements other than for pandas, numpy, and matplotlib.
+9. Your code must not contain any import statements other than for pandas, numpy, and matplotlib.
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
