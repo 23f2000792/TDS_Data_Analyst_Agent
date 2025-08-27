@@ -309,7 +309,9 @@ def plot_to_base64(max_bytes=100000):
     script_lines.extend(preamble)
     script_lines.append(helper)
     script_lines.append("\nresults = {}\n")
-    script_lines.append(code)
+    safe_code = code.replace("from functions import scrape_url_to_dataframe",
+                         "from __main__ import scrape_url_to_dataframe")
+    script_lines.append(safe_code)
     # ensure results printed as json
     script_lines.append("\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n")
 
@@ -375,6 +377,7 @@ You must:
 6. Your Python code will run in a sandbox with:
    - pandas, numpy, matplotlib, networkx available
    - A helper function `plot_to_base64()` (called with no arguments) for generating base64-encoded images. DO NOT import or define it.
+   - Do NOT import scrape_url_to_dataframe. It is already available in the environment.
 7. For plots, always use `plot_to_base64()` and return a raw base64 string (no data URI).
 8. All numeric values in the final `results` dict must be actual numbers (int/float), not strings.
 """),
