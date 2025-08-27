@@ -155,7 +155,21 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
             try:
                 tables = pd.read_html(StringIO(html_content), flavor="bs4")
                 if tables:
-                    df = tables[0]
+                    # Find the best table by looking for keywords
+                    best_table = None
+                    max_score = -1
+                    keywords = ['company', 'revenue', 'headquarters', 'users']
+                    for table in tables:
+                        score = 0
+                        for col in table.columns:
+                            for kw in keywords:
+                                if kw in str(col).lower():
+                                    score += 1
+                        if score > max_score:
+                            max_score = score
+                            best_table = table
+                    df = best_table if best_table is not None else tables[0]
+
             except ValueError:
                 pass
 
