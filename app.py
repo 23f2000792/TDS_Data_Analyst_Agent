@@ -180,8 +180,8 @@ def clean_llm_output(output: str) -> Dict:
         if not output:
             return {"error": "Empty LLM output"}
         # remove triple-fence markers if present
-        s = re.sub(r"^```
-        s = re.sub(r"\s*```$", "", s)
+        s = re.sub(r"^```(?:json)?\s*", "", output.strip())
+        s = re.sub(r"\s*```
         # find outermost JSON object by scanning for balanced braces
         first = s.find("{")
         last = s.rfind("}")
