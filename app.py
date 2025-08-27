@@ -236,6 +236,7 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
         "import networkx as nx",
         "from io import BytesIO",
         "import base64",
+        "from typing import Dict, Any, List"
     ]
     if PIL_AVAILABLE:
         preamble.append("from PIL import Image")
