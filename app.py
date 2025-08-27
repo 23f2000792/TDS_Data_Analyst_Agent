@@ -320,16 +320,12 @@ def plot_to_base64(max_bytes=100000):
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
     
-    # Wrap agent code in a function and a try/except block for guaranteed output
+    # Wrap agent code in a try/except block for guaranteed output
     wrapped_code = f"""
-def agent_code():
-    results = {{}}
-    {code}
-    return results
-
+results = {{}}
 try:
-    final_results = agent_code()
-    print(json.dumps({{'status':'success','result':final_results}}, default=str), flush=True)
+    {code}
+    print(json.dumps({{'status':'success','result':results}}, default=str), flush=True)
 except Exception as e:
     error_str = traceback.format_exc()
     print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
