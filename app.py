@@ -376,6 +376,7 @@ You must:
 6. Your Python code will run in a sandbox with:
    - pandas, numpy, matplotlib, networkx available
    - A helper function `plot_to_base64()` (called with no arguments) for generating base64-encoded images. DO NOT import or define it.
+   - A helper function `scrape_url_to_dataframe(url)` for fetching data. DO NOT import or define it.
 7. For plots, always use `plot_to_base64()` and return a raw base64 string (no data URI).
 8. All numeric values in the final `results` dict must be actual numbers (int/float), not strings.
 9. When processing scraped data, be robust. Check if expected columns (e.g., 'revenue') exist before accessing them. If not, handle it gracefully.
