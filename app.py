@@ -10,21 +10,34 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import io
+import os
+import inspect
+import re
+import json
+import base64
+import tempfile
 import subprocess
 import logging
 from io import BytesIO
 from typing import Dict, Any, List
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+
 import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Optional image conversion
 try:
     from PIL import Image
     PIL_AVAILABLE = True
-except ImportError:
+except Exception:
     PIL_AVAILABLE = False
 
 # LangChain / LLM imports
@@ -68,6 +81,7 @@ def parse_keys_and_types(raw_questions: str):
         keys_list: list of keys in order
         type_map: dict key -> casting function
     """
+    import re
     pattern = r"-\s*`([^`]+)`\s*:\s*(\w+)"
     matches = re.findall(pattern, raw_questions)
     type_map_def = {
@@ -82,6 +96,8 @@ def parse_keys_and_types(raw_questions: str):
     return keys_list, type_map
 
 
+
+
 # -----------------------------
 # Tools
 # -----------------------------
@@ -94,7 +110,7 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
     """
     print(f"Scraping URL: {url}")
     try:
-        from io import StringIO
+        from io import BytesIO, StringIO
         from bs4 import BeautifulSoup
 
         headers = {
@@ -139,8 +155,21 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
             try:
                 tables = pd.read_html(StringIO(html_content), flavor="bs4")
                 if tables:
-                    # Combine all tables found on the page into one DataFrame
-                    df = pd.concat(tables, ignore_index=True)
+                    # Find the best table by looking for keywords
+                    best_table = None
+                    max_score = -1
+                    keywords = ['company', 'revenue', 'headquarters', 'users']
+                    for table in tables:
+                        score = 0
+                        for col in table.columns:
+                            for kw in keywords:
+                                if kw in str(col).lower():
+                                    score += 1
+                        if score > max_score:
+                            max_score = score
+                            best_table = table
+                    df = best_table if best_table is not None else tables[0]
+
             except ValueError:
                 pass
 
@@ -156,7 +185,6 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
 
         # --- Normalize columns ---
         df.columns = df.columns.map(str).str.replace(r'\[.*\]', '', regex=True).str.strip()
-        df = df.dropna(axis=1, how='all') # Drop columns that are entirely empty
 
         return {
             "status": "success",
@@ -174,7 +202,6 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
 def clean_llm_output(output: str) -> Dict:
     """
     Extract JSON object from LLM output robustly.
-    Fixes common errors like invalid backslash escapes.
     Returns dict or {"error": "..."}
     """
     try:
@@ -183,11 +210,6 @@ def clean_llm_output(output: str) -> Dict:
         # remove triple-fence markers if present
         s = re.sub(r"^```(?:json)?\s*", "", output.strip())
         s = re.sub(r"\s*```$", "", s)
-
-        # FIX: Find and fix invalid backslash escapes before parsing.
-        # This looks for a backslash that is NOT followed by a valid JSON escape character.
-        s = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
-
         # find outermost JSON object by scanning for balanced braces
         first = s.find("{")
         last = s.rfind("}")
@@ -196,51 +218,35 @@ def clean_llm_output(output: str) -> Dict:
         candidate = s[first:last+1]
         try:
             return json.loads(candidate)
-        except json.JSONDecodeError as e:
+        except Exception as e:
             # fallback: try last balanced pair scanning backwards
             for i in range(last, first, -1):
                 cand = s[first:i+1]
                 try:
                     return json.loads(cand)
-                except json.JSONDecodeError:
+                except Exception:
                     continue
             return {"error": f"JSON parsing failed: {str(e)}", "raw": candidate}
     except Exception as e:
         return {"error": str(e)}
 
-
 def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
     """
-    Write a temp python file which:
-      - provides a safe environment (imports)
-      - loads df/from pickle if provided into df and data variables
-      - defines a robust plot_to_base64() helper that ensures < 100kB (attempts resizing/conversion)
-      - executes the user code (which should populate `results` dict)
-      - prints json.dumps({"status":"success","result":results})
-    Returns dict with parsed JSON or error details.
+    Writes and executes a Python script in a temporary file.
+    The script is expected to print a JSON object to stdout.
     """
-    preamble = [
-        "import json, sys, gc, re",
-        "import pandas as pd, numpy as np",
-        "import matplotlib",
-        "matplotlib.use('Agg')",
-        "import matplotlib.pyplot as plt",
-        "import networkx as nx",
-        "from io import BytesIO",
-        "import base64",
-    ]
-    if PIL_AVAILABLE:
-        preamble.append("from PIL import Image")
+    # Create file content
+    script_to_run = f"""
+import json, sys, gc, traceback
+import pandas as pd, numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import networkx as nx
+from io import BytesIO
+import base64
+from typing import Dict, Any, List
 
-    if injected_pickle:
-        preamble.append(f"df = pd.read_pickle(r'''{injected_pickle}''')")
-        preamble.append("data = df.to_dict(orient='records')")
-    else:
-        preamble.append("data = globals().get('data', {})")
-        preamble.append("df = pd.DataFrame(data)")
-
-
-    helper = r'''
 def plot_to_base64(max_bytes=100000):
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
@@ -251,61 +257,50 @@ def plot_to_base64(max_bytes=100000):
     img_bytes = buf.getvalue()
     if len(img_bytes) <= max_bytes:
         return base64.b64encode(img_bytes).decode('ascii')
-    # try decreasing dpi
+    # try decreasing dpi/figure size iteratively
     for dpi in [80, 60, 50, 40, 30]:
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
-        plt.clf(); plt.close('all'); gc.collect()
+        plt.clf()
+        plt.close('all')
+        gc.collect()
         buf.seek(0)
         b = buf.getvalue()
         if len(b) <= max_bytes:
             return base64.b64encode(b).decode('ascii')
-    # if Pillow available, try convert to WEBP
-    try:
-        from PIL import Image
-        buf.seek(0)
-        im = Image.open(buf)
-        for quality in [80, 60]:
-            out_buf = BytesIO()
-            im.save(out_buf, format='WEBP', quality=quality)
-            out_buf.seek(0)
-            ob = out_buf.getvalue()
-            if len(ob) <= max_bytes:
-                return base64.b64encode(ob).decode('ascii')
-    except Exception:
-        pass
-    # as last resort return smallest PNG even if > max_bytes
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
-    plt.clf(); plt.close('all'); gc.collect()
-    buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode('ascii')
-'''
-    script_lines = [
-        *preamble,
-        helper,
-        "\nresults = {}\n",
-        code,
-        "\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n"
-    ]
+    return base64.b64encode(b).decode('ascii')
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as tmp:
-        tmp.write("\n".join(script_lines))
-        tmp_path = tmp.name
+results = {{}}
+df = None
+if "{injected_pickle}":
+    df = pd.read_pickle(r'''{injected_pickle}''')
+
+try:
+    {code}
+    print(json.dumps({{'status':'success','result':results}}, default=str), flush=True)
+except Exception as e:
+    error_str = traceback.format_exc()
+    print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
+"""
+    
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
+    tmp.write(script_to_run)
+    tmp.flush(); tmp_path = tmp.name; tmp.close()
 
     try:
-        completed = subprocess.run(
-            [sys.executable, tmp_path],
-            capture_output=True, text=True, timeout=timeout, check=False
-        )
-        if completed.returncode != 0:
-            return {"status": "error", "message": completed.stderr.strip() or completed.stdout.strip()}
+        completed = subprocess.run([sys.executable, tmp_path],
+                                     capture_output=True, text=True, timeout=timeout)
         
         out = completed.stdout.strip()
+        if not out:
+            return {"status": "error", "message": completed.stderr.strip() or "Unknown execution error"}
+
         try:
-            return json.loads(out)
-        except json.JSONDecodeError as e:
+            parsed = json.loads(out)
+            return parsed
+        except Exception as e:
             return {"status": "error", "message": f"Could not parse JSON output: {str(e)}", "raw": out}
+            
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": "Execution timed out"}
     finally:
@@ -313,35 +308,37 @@ def plot_to_base64(max_bytes=100000):
             os.unlink(tmp_path)
             if injected_pickle and os.path.exists(injected_pickle):
                 os.unlink(injected_pickle)
-        except OSError:
+        except Exception:
             pass
+
 
 # -----------------------------
 # LLM agent setup
 # -----------------------------
+# Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    model=os.getenv("OPENAI_MODEL", "o3-mini"),
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
 
+
+# Tools list for agent (LangChain tool decorator returns metadata for the LLM)
+tools = [scrape_url_to_dataframe]
+
+# Prompt: instruct agent to call the tool and output JSON only
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a full-stack autonomous data analyst agent.
+    ("system", """You are a data analyst agent. You write Python code to answer questions.
 
-You will receive:
-- A set of **rules** for this request
-- One or more **questions**
-- An optional **dataset preview**
-
-You must:
-1. Follow the provided rules exactly.
-2. Return only a valid JSON object — no extra commentary or formatting.
-3. The JSON must contain:
-   - "questions": [ list of original question strings exactly as provided ]
-   - "code": "..." (Python code that creates a dict called `results` with each question string as a key and its computed answer as the value)
-4. Your Python code will run in a sandbox with pandas, numpy, matplotlib, networkx available.
-5. A helper function `plot_to_base64()` is available for generating base64-encoded images under 100KB. Use it for all plots.
-6. Make sure all variables are defined before use, and the code can run without any undefined references.
+**RULES:**
+1. You will be given a task, and optionally a dataset.
+2. Your response MUST be a single JSON object with one key: "code".
+3. The value of "code" must be a Python script that populates a dictionary named `results`.
+4. The script MUST NOT contain a `return` statement. It should only populate the `results` dictionary.
+5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
+6. **CRITICAL RULE: You MUST ONLY use the data provided (either from the `df` variable or by calling the `scrape_url_to_dataframe` function). DO NOT invent, hallucinate, or synthesize data under any circumstances.**
+7. If a question cannot be answered from the available data, the value for that key in the `results` dictionary MUST be the string "Not applicable".
+8. Your code MUST include all necessary imports (e.g., pandas, numpy, matplotlib, base64, io, etc.).
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -349,43 +346,55 @@ You must:
 
 agent = create_tool_calling_agent(
     llm=llm,
-    tools=[scrape_url_to_dataframe],
+    tools=tools,
     prompt=prompt
 )
 
 agent_executor = AgentExecutor(
     agent=agent,
-    tools=[scrape_url_to_dataframe],
+    tools=tools,
     verbose=True,
-    max_iterations=4,
-    early_stopping_method="generate",
-    handle_parsing_errors=True,
+    max_iterations=5,
+    handle_parsing_errors=lambda e: f"Output parsing error: {e}",
+    return_intermediate_steps=False
 )
 
 # -----------------------------
-# API Endpoints
+# Runner
 # -----------------------------
 @app.post("/")
-@app.post("/api")
 @app.post("/api/")
+@app.post("/api")
 async def analyze_data(request: Request):
     try:
         form = await request.form()
-        questions_file = form.get("questions_file")
-        data_file = form.get("data_file")
+        questions_file = None
+        data_file = None
 
-        if not questions_file or not hasattr(questions_file, "read"):
+        for key, val in form.items():
+            if hasattr(val, "filename") and val.filename:  # it's a file
+                fname = val.filename.lower()
+                if fname.endswith(".txt") and questions_file is None:
+                    questions_file = val
+                else:
+                    data_file = val
+
+        if not questions_file:
             raise HTTPException(400, "Missing questions file (.txt)")
 
         raw_questions = (await questions_file.read()).decode("utf-8")
+        keys_list, type_map = parse_keys_and_types(raw_questions)
         
         pickle_path = None
         df_preview = ""
-        
-        if data_file and hasattr(data_file, "filename") and data_file.filename:
+        dataset_uploaded = False
+
+        if data_file:
+            dataset_uploaded = True
             filename = data_file.filename.lower()
             content = await data_file.read()
-            
+            from io import BytesIO
+
             if filename.endswith(".csv"):
                 df = pd.read_csv(BytesIO(content))
             elif filename.endswith((".xlsx", ".xls")):
@@ -396,124 +405,125 @@ async def analyze_data(request: Request):
                 try:
                     df = pd.read_json(BytesIO(content))
                 except ValueError:
-                    df = pd.json_normalize(json.loads(content.decode("utf-8")))
+                    df = pd.DataFrame(json.loads(content.decode("utf-8")))
+            elif filename.endswith(".png") or filename.endswith(".jpg") or filename.endswith(".jpeg"):
+                try:
+                    if PIL_AVAILABLE:
+                        image = Image.open(BytesIO(content))
+                        image = image.convert("RGB")
+                        df = pd.DataFrame({"image": [image]})
+                    else:
+                        raise HTTPException(400, "PIL not available for image processing")
+                except Exception as e:
+                    raise HTTPException(400, f"Image processing failed: {str(e)}")  
             else:
                 raise HTTPException(400, f"Unsupported data file type: {filename}")
 
-            with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as temp_pkl:
-                df.to_pickle(temp_pkl.name)
-                pickle_path = temp_pkl.name
+            temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
+            temp_pkl.close()
+            df.to_pickle(temp_pkl.name)
+            pickle_path = temp_pkl.name
 
             df_preview = (
-                f"\n\nThe uploaded dataset has {len(df)} rows and {len(df.columns)} columns.\n"
+                f"\n\nDataset Preview:\n"
                 f"Columns: {', '.join(df.columns.astype(str))}\n"
                 f"First 5 rows:\n{df.head(5).to_markdown(index=False)}\n"
             )
-        
-        base_rules = [
-            "Your generated python code MUST create a dictionary called `results`.",
-            "The keys in the `results` dictionary MUST be the exact question strings.",
-            "For plots: use the pre-defined plot_to_base64() helper to return base64 image data.",
-            "FIX: When converting columns to numeric types, first remove any non-numeric characters like commas, currency symbols (e.g., '$'), or text annotations."
-        ]
-        
-        if pickle_path:
-            llm_rules = "\n".join([
-                "Rules:",
-                "1) You have access to a pandas DataFrame called `df` and its dictionary form `data`.",
-                "2) DO NOT call scrape_url_to_dataframe() or fetch any external data.",
-                "3) Use only the uploaded dataset for answering questions.",
-                *base_rules
-            ])
+
+        if dataset_uploaded:
+            llm_rules = (
+                "Rules:\n"
+                "1) Use the provided pandas DataFrame called `df`.\n"
+                "2) DO NOT call scrape_url_to_dataframe().\n"
+            )
         else:
-            llm_rules = "\n".join([
-                "Rules:",
-                "1) If you need web data, call the pre-defined function `scrape_url_to_dataframe(url)`. It is already available.",
-                *base_rules
-            ])
+            llm_rules = (
+                "Rules:\n"
+                "1) You must call `scrape_url_to_dataframe(url)` to get data.\n"
+            )
 
-        llm_input = f"{llm_rules}\n\nQuestions:\n{raw_questions}\n{df_preview}\nRespond with the JSON object only."
+        llm_input = (
+            f"{llm_rules}\nTask Description:\n{raw_questions}\n"
+            f"{df_preview if df_preview else ''}"
+            "Respond with the JSON object only."
+        )
 
-        result = run_agent_safely_unified(llm_input, pickle_path)
+        # Run agent
+        response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
+        raw_out = response.get("output") or ""
+        if not raw_out or "code" not in raw_out:
+             raise HTTPException(500, detail=f"Agent returned no usable output. Last response: {raw_out}")
 
-        if "error" in result:
-            raise HTTPException(500, detail=result)
+        parsed = clean_llm_output(raw_out)
+        if "error" in parsed:
+            raise HTTPException(500, detail=f"Could not parse agent output: {parsed['error']}")
 
-        return JSONResponse(content=result)
+        if "code" not in parsed:
+             raise HTTPException(500, detail=f"Invalid agent response: 'code' key missing. Response: {parsed}")
+        
+        code = parsed["code"]
+
+        # Execute the code
+        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
+        if exec_result.get("status") != "success":
+            raise HTTPException(500, detail=f"Execution failed: {exec_result.get('message')}")
+
+        results_dict = exec_result.get("result", {})
+
+        # Post-process to ensure correct types
+        final_result = {}
+        for key in keys_list:
+            if key in results_dict:
+                caster = type_map.get(key, str)
+                try:
+                    val = results_dict[key]
+                    if isinstance(val, str) and caster != str:
+                        if not val.startswith(('iVBO', '/9j/')):
+                            final_result[key] = caster(val)
+                        else:
+                            final_result[key] = val
+                    else:
+                        final_result[key] = caster(val)
+                except (ValueError, TypeError):
+                    final_result[key] = results_dict[key]
+            else:
+                 final_result[key] = None
+
+        return JSONResponse(content=final_result)
 
     except HTTPException as he:
         raise he
     except Exception as e:
         logger.exception("analyze_data failed")
         raise HTTPException(500, detail=str(e))
+    
+from fastapi.responses import FileResponse, Response
+import base64, os
 
-
-def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
-    """
-    Runs the LLM agent and executes code.
-    - If pickle_path is provided, it's used directly.
-    - If no pickle_path, the agent's code can use the scrape tool, which is handled during execution.
-    """
-    try:
-        response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
-        raw_out = response.get("output", "")
-
-        if not raw_out:
-            return {"error": f"Agent returned no output after multiple attempts. Full response: {response}"}
-
-        parsed = clean_llm_output(raw_out)
-        if "error" in parsed:
-            return parsed
-
-        if "code" not in parsed or "questions" not in parsed:
-            return {"error": f"Invalid agent response format: {parsed}"}
-
-        code = parsed["code"]
-        questions = parsed["questions"]
-
-        # If a file was uploaded, we pass its pickle path.
-        # If not, the generated code might contain a scrape call, which will be executed inside the temp script.
-        # The `write_and_run_temp_python` function now has access to the scrape tool definition.
-        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
-        
-        if exec_result.get("status") != "success":
-            return {"error": f"Execution failed", "details": exec_result.get('message'), "raw": exec_result.get("raw")}
-
-        results_dict = exec_result.get("result", {})
-        
-        # Ensure all original questions are present in the final output
-        final_output = {q: results_dict.get(q, "Answer not found in generated code") for q in questions}
-        
-        return final_output
-
-    except Exception as e:
-        logger.exception("run_agent_safely_unified failed")
-        return {"error": str(e)}
-
-
-# -----------------------------
-# Static Content and Info
-# -----------------------------
+# 1×1 transparent PNG fallback (if favicon.ico file not present)
 _FAVICON_FALLBACK_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO3n+9QAAAAASUVORK5CYII="
 )
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    """Serve favicon.ico or a fallback."""
-    if os.path.exists("favicon.ico"):
-        return FileResponse("favicon.ico", media_type="image/x-icon")
+    """
+    Serve favicon.ico if present in the working directory.
+    """
+    path = "favicon.ico"
+    if os.path.exists(path):
+        return FileResponse(path, media_type="image-x-icon")
     return Response(content=_FAVICON_FALLBACK_PNG, media_type="image/png")
 
 @app.get("/api", include_in_schema=False)
 async def analyze_get_info():
-    """Health/info endpoint."""
+    """Health/info endpoint. Use POST /api for actual analysis."""
     return JSONResponse({
         "ok": True,
         "message": "Server is running. Use POST /api with 'questions_file' and optional 'data_file'.",
+
     })
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
