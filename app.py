@@ -420,13 +420,16 @@ def run_agent_safely(llm_input: str) -> Dict:
             parsed = json.loads(raw_out)
         except json.JSONDecodeError:
             match = re.search(r"\{[\s\S]*\}", raw_out)  # extract first {...} block
+            
             if match:
                 try:
                     parsed = json.loads(match.group())
                 except json.JSONDecodeError:
                     return {"error": f"Could not parse JSON object from LLM output: {raw_out}"}
-                else:
-                    return {"error": f"No JSON object found in LLM output: {raw_out}"}
+                
+            else:
+                return {"error": f"No JSON object found in LLM output: {raw_out}"}
+
 
         if not parsed or not isinstance(parsed, dict):
             return {"error": f"Parsed output is not valid JSON: {raw_out}"}
