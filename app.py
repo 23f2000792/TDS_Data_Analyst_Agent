@@ -431,9 +431,8 @@ def run_agent_safely(llm_input: str) -> Dict:
                 return {"error": f"No JSON object found in LLM output: {raw_out}"}
 
 
-        if not parsed or not isinstance(parsed, dict):
-            return {"error": f"Parsed output is not valid JSON: {raw_out}"}
- 
+        if not isinstance(parsed, dict):
+            return {"error": f"Parsed output is not a valid JSON object: {raw_out}"}
             
         if "code" not in parsed or "questions" not in parsed:
             return {"error": f"Expected keys 'code' and 'questions' not found. Got: {parsed}"}
