@@ -1,3 +1,4 @@
+
 import os
 import networkx as nx
 import re
@@ -24,8 +25,6 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi import FastAPI
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-
 
 import requests
 import pandas as pd
@@ -39,9 +38,9 @@ try:
 except Exception:
     PIL_AVAILABLE = False
 
-# LangChain / LLM imports
+# LangChain / LLM imports (keep as you used)
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 
@@ -50,15 +49,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TDS Data Analyst Agent")
-
-# Add CORS middleware to allow cross-origin requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 150))
 
@@ -291,7 +281,6 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
         "import matplotlib",
         "matplotlib.use('Agg')",
         "import matplotlib.pyplot as plt",
-        "import networkx as nx",
         "from io import BytesIO",
         "import base64",
     ]
@@ -310,9 +299,6 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
 def plot_to_base64(max_bytes=100000):
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
     buf.seek(0)
     img_bytes = buf.getvalue()
     if len(img_bytes) <= max_bytes:
@@ -321,9 +307,6 @@ def plot_to_base64(max_bytes=100000):
     for dpi in [80, 60, 50, 40, 30]:
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
         buf.seek(0)
         b = buf.getvalue()
         if len(b) <= max_bytes:
@@ -333,9 +316,6 @@ def plot_to_base64(max_bytes=100000):
         from PIL import Image
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
         buf.seek(0)
         im = Image.open(buf)
         out_buf = BytesIO()
@@ -356,9 +336,6 @@ def plot_to_base64(max_bytes=100000):
     # as last resort return downsized PNG even if > max_bytes
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
     buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
@@ -381,7 +358,7 @@ def plot_to_base64(max_bytes=100000):
 
     try:
         completed = subprocess.run([sys.executable, tmp_path],
-                                     capture_output=True, text=True, timeout=timeout)
+                                   capture_output=True, text=True, timeout=timeout)
         if completed.returncode != 0:
             # collect stderr and stdout for debugging
             return {"status": "error", "message": completed.stderr.strip() or completed.stdout.strip()}
@@ -406,13 +383,11 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # LLM agent setup
 # -----------------------------
-# Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
 llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "o3-mini"),
-    temperature=0,
-    openai_api_key=os.getenv("OPENAI_API_KEY")
+    model=os.getenv("OPENAI_MODEL", "o3-mini"),
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY")
 )
-
 
 # Tools list for agent (LangChain tool decorator returns metadata for the LLM)
 tools = [scrape_url_to_dataframe]  # we only expose scraping as a tool; agent will still produce code
@@ -433,7 +408,7 @@ You must:
    - "questions": [ list of original question strings exactly as provided ]
    - "code": "..." (Python code that creates a dict called `results` with each question string as a key and its computed answer as the value)
 4. Your Python code will run in a sandbox with:
-   - pandas, numpy, matplotlib, networkx available
+   - pandas, numpy, matplotlib available
    - A helper function `plot_to_base64(max_bytes=100000)` for generating base64-encoded images under 100KB.
 5. When returning plots, always use `plot_to_base64()` to keep image sizes small.
 6. Make sure all variables are defined before use, and the code can run without any undefined references.
@@ -491,7 +466,7 @@ def run_agent_safely(llm_input: str) -> Dict:
         if urls:
             # For now support only the first URL (agent may code multiple scrapes; you can extend this)
             url = urls[0]
-            tool_resp = scrape_url_to_dataframe.invoke(url) # <-- DEPRECATION FIX
+            tool_resp = scrape_url_to_dataframe(url)
             if tool_resp.get("status") != "success":
                 return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
             # create df and pickle it
@@ -521,9 +496,10 @@ def run_agent_safely(llm_input: str) -> Dict:
 
 
 from fastapi import Request
+
 @app.post("/")
-@app.post("/api/")
 @app.post("/api")
+@app.post("/api/")
 async def analyze_data(request: Request):
     try:
         form = await request.form()
@@ -542,7 +518,8 @@ async def analyze_data(request: Request):
             raise HTTPException(400, "Missing questions file (.txt)")
 
         raw_questions = (await questions_file.read()).decode("utf-8")
-        
+        keys_list, type_map = parse_keys_and_types(raw_questions)
+
         pickle_path = None
         df_preview = ""
         dataset_uploaded = False
@@ -596,17 +573,19 @@ async def analyze_data(request: Request):
                 "1) You have access to a pandas DataFrame called `df` and its dictionary form `data`.\n"
                 "2) DO NOT call scrape_url_to_dataframe() or fetch any external data.\n"
                 "3) Use only the uploaded dataset for answering questions.\n"
-                "4) Your generated python code MUST create a dictionary called `results`.\n"
-                "5) The keys in the `results` dictionary MUST be the snake_case identifiers (e.g., 'edge_count', 'highest_degree_node') specified in the questions file.\n"
-                "6) For plots: use the pre-defined plot_to_base64() helper to return base64 image data under 100kB.\n"
+                "4) Produce a final JSON object with keys:\n"
+                '   - "questions": [ ... original question strings ... ]\n'
+                '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
+                "5) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
             )
         else:
             llm_rules = (
                 "Rules:\n"
-                "1) If you need web data, call the pre-defined function `scrape_url_to_dataframe(url)`. It is already available, DO NOT import it.\n"
-                "2) Your generated python code MUST create a dictionary called `results`.\n"
-                "3) The keys in the `results` dictionary MUST be the snake_case identifiers (e.g., 'edge_count', 'highest_degree_node') specified in the questions file.\n"
-                "4) For plots: use the pre-defined plot_to_base64() helper to return base64 image data under 100kB.\n"
+                "1) If you need web data, CALL scrape_url_to_dataframe(url).\n"
+                "2) Produce a final JSON object with keys:\n"
+                '   - "questions": [ ... original question strings ... ]\n'
+                '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
+                "3) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
             )
 
         llm_input = (
@@ -626,6 +605,23 @@ async def analyze_data(request: Request):
 
         if "error" in result:
             raise HTTPException(500, detail=result["error"])
+
+        # Post-process key mapping & type casting
+        if keys_list and type_map:
+            mapped = {}
+            for idx, q in enumerate(result.keys()):
+                if idx < len(keys_list):
+                    key = keys_list[idx]
+                    caster = type_map.get(key, str)
+                    try:
+                        val = result[q]
+                        if isinstance(val, str) and val.startswith("data:image/"):
+                            # Remove data URI prefix
+                            val = val.split(",", 1)[1] if "," in val else val
+                        mapped[key] = caster(val) if val not in (None, "") else val
+                    except Exception:
+                        mapped[key] = result[q]
+            result = mapped
 
         return JSONResponse(content=result)
 
@@ -662,12 +658,13 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
             return {"error": f"Invalid agent response: {parsed}"}
 
         code = parsed["code"]
-        
+        questions = parsed["questions"]
+
         if pickle_path is None:
             urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
             if urls:
                 url = urls[0]
-                tool_resp = scrape_url_to_dataframe.invoke(url) # <-- DEPRECATION FIX
+                tool_resp = scrape_url_to_dataframe(url)
                 if tool_resp.get("status") != "success":
                     return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
                 df = pd.DataFrame(tool_resp["data"])
@@ -681,7 +678,7 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
             return {"error": f"Execution failed: {exec_result.get('message')}", "raw": exec_result.get("raw")}
 
         results_dict = exec_result.get("result", {})
-        return results_dict
+        return {q: results_dict.get(q, "Answer not found") for q in questions}
 
     except Exception as e:
         logger.exception("run_agent_safely_unified failed")
