@@ -410,66 +410,85 @@ def run_agent_safely(llm_input: str) -> Dict:
     """
     try:
         response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
-        raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
+        raw_out = (
+            response.get("output")
+            or response.get("final_output")
+            or response.get("text")
+            or ""
+        )
         logger.debug(f"Raw LLM output: {raw_out}")
+
         if not raw_out:
             return {"error": f"Agent returned no output. Full response: {response}"}
 
         parsed = None
+
+        # --- First attempt: strict JSON
         try:
             parsed = json.loads(raw_out)
-        except json.JSONDecodeError:
-            match = re.search(r"\{[\s\S]*\}", raw_out)  # extract first {...} block
-            
+        except Exception:
+            # --- Second attempt: regex to extract {...}
+            match = re.search(r"\{[\s\S]*\}", raw_out)
             if match:
                 try:
                     parsed = json.loads(match.group())
-                except json.JSONDecodeError:
-                    return {"error": f"Could not parse JSON object from LLM output: {raw_out}"}
-                
+                except Exception:
+                    # --- Third attempt: use json5 if installed
+                    try:
+                        import json5
+                        parsed = json5.loads(match.group())
+                    except Exception:
+                        return {
+                            "error": f"Could not parse JSON object from LLM output: {raw_out[:300]}..."
+                        }
             else:
-                return {"error": f"No JSON object found in LLM output: {raw_out}"}
+                return {"error": f"No JSON object found in LLM output: {raw_out[:300]}..."}
 
-
+        # --- Validate parsed output
         if not isinstance(parsed, dict):
-            return {"error": f"Parsed output is not a valid JSON object: {raw_out}"}
-            
-        if "code" not in parsed or "questions" not in parsed:
-            return {"error": f"Expected keys 'code' and 'questions' not found. Got: {parsed}"}
+            return {"error": f"Parsed output is not a valid JSON object: {parsed}"}
 
+        if "code" not in parsed or "questions" not in parsed:
+            return {
+                "error": f"Expected keys 'code' and 'questions' not found. Got: {parsed}"
+            }
 
         code = parsed["code"]
         questions: List[str] = parsed["questions"]
 
-        # Detect scrape calls; find all URLs used in scrape_url_to_dataframe("URL")
+        # --- Detect scrape calls
         urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
         pickle_path = None
         if urls:
-            # For now support only the first URL (agent may code multiple scrapes; you can extend this)
             url = urls[0]
             tool_resp_str = scrape_url_to_dataframe(url)
-            tool_resp = json.loads(tool_resp_str)
+            try:
+                tool_resp = json.loads(tool_resp_str)
+            except Exception as e:
+                return {"error": f"Scrape tool returned non-JSON: {tool_resp_str}, err={e}"}
+
             if tool_resp.get("status") != "success":
                 return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
-            # create df and pickle it
+
             df = pd.DataFrame(tool_resp["data"])
             temp_pkl = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
             temp_pkl.close()
             df.to_pickle(temp_pkl.name)
             pickle_path = temp_pkl.name
-            # Make sure agent's code can reference df/data: we will inject the pickle loader in the temp script
 
-        # Execute code in temp python script
-        exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
+        # --- Execute agent code
+        exec_result = write_and_run_temp_python(
+            code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS
+        )
+
         if exec_result.get("status") != "success":
-            return {"error": f"Execution failed: {exec_result.get('message', exec_result)}", "raw": exec_result.get("raw")}
+            return {
+                "error": f"Execution failed: {exec_result.get('message', exec_result)}",
+                "raw": exec_result.get("raw"),
+            }
 
-        # exec_result['result'] should be results dict
         results_dict = exec_result.get("result", {})
-        # Map to original questions (they asked to use exact question strings)
-        output = {}
-        for q in questions:
-            output[q] = results_dict.get(q, "Answer not found")
+        output = {q: results_dict.get(q, "Answer not found") for q in questions}
         return output
 
     except Exception as e:
