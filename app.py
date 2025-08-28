@@ -113,7 +113,7 @@ def parse_keys_and_types(raw_questions: str) -> Tuple[List[str], Dict[str, Any]]
 # Tools
 # -----------------------------
 @tool
-def scrape_url_to_dataframe(url: str) -> str:
+def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
     """
     Fetch a URL and return data as a DataFrame (supports HTML tables, CSV, Excel, Parquet, JSON, and plain text).
     Always returns a JSON string with {"status": "success", "data": [...], "columns": [...]} if fetch works.
@@ -193,12 +193,14 @@ def scrape_url_to_dataframe(url: str) -> str:
         # Normalize columns
         df.columns = df.columns.map(str).str.replace(r"\[.*\]", "", regex=True).str.strip()
 
-        return json.dumps(
-            {"status": "success", "data": df.to_dict(orient="records"), "columns": df.columns.tolist()}
-        )
+        return {
+            "status": "success",
+            "data": df.to_dict(orient="records"),
+            "columns": df.columns.tolist()
+        }
 
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        return {"status": "error", "message": str(e)}
 
 
 # -----------------------------
@@ -460,12 +462,8 @@ def run_agent_safely(llm_input: str) -> Dict[str, Any]:
         pickle_path = None
         if urls:
             url = urls[0]
-            tool_resp_str = scrape_url_to_dataframe(url)
-            try:
-                tool_resp = json.loads(tool_resp_str)
-            except Exception as e:
-                return {"error": f"Scrape tool returned non-JSON", "raw": tool_resp_str[:500]}
-
+            tool_resp = scrape_url_to_dataframe(url)
+            
             if tool_resp.get("status") != "success":
                 return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
 
