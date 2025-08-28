@@ -13,6 +13,7 @@ import io
 import os
 import re
 import json
+import json5
 import base64
 import tempfile
 import subprocess
@@ -410,15 +411,30 @@ def run_agent_safely(llm_input: str) -> Dict:
     try:
         response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
         raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
+        logger.debug(f"Raw LLM output: {raw_out}")
         if not raw_out:
             return {"error": f"Agent returned no output. Full response: {response}"}
 
-        parsed = clean_llm_output(raw_out)
-        if "error" in parsed:
-            return parsed
+        parsed = None
+        try:
+            parsed = json.loads(raw_out)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", raw_out)  # extract first {...} block
+            if match:
+                try:
+                    parsed = json.loads(match.group())
+                except json.JSONDecodeError:
+                    return {"error": f"Could not parse JSON object from LLM output: {raw_out}"}
+                else:
+                    return {"error": f"No JSON object found in LLM output: {raw_out}"}
 
-        if not isinstance(parsed, dict) or "code" not in parsed or "questions" not in parsed:
-            return {"error": f"Invalid agent response format: {parsed}"}
+        if not parsed or not isinstance(parsed, dict):
+            return {"error": f"Parsed output is not valid JSON: {raw_out}"}
+ 
+            
+        if "code" not in parsed or "questions" not in parsed:
+            return {"error": f"Expected keys 'code' and 'questions' not found. Got: {parsed}"}
+
 
         code = parsed["code"]
         questions: List[str] = parsed["questions"]
