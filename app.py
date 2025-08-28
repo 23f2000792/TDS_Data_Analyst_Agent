@@ -164,7 +164,20 @@ def scrape_url_to_dataframe(url: str) -> str:
             try:
                 tables = pd.read_html(StringIO(html_content), flavor="bs4")
                 if tables:
-                    df = tables[0]
+                    # Find the best table by looking for keywords
+                    best_table = None
+                    max_score = -1
+                    keywords = ['company', 'revenue', 'headquarters', 'users', 'film', 'gross', 'rank', 'peak']
+                    for table in tables:
+                        score = 0
+                        table_cols_lower = [str(col).lower() for col in table.columns]
+                        for kw in keywords:
+                            if any(kw in col for col in table_cols_lower):
+                                score += 1
+                        if score > max_score:
+                            max_score = score
+                            best_table = table
+                    df = best_table if best_table is not None else tables[0]
             except ValueError:
                 pass
             # If no table found, fallback to plain text
@@ -244,7 +257,7 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
     Returns dict with parsed JSON or error details.
     """
     preamble = [
-        "import json, sys, gc",
+        "import json, sys, gc, traceback",
         "import pandas as pd, numpy as np",
         "import matplotlib",
         "matplotlib.use('Agg')",
@@ -303,13 +316,22 @@ def plot_to_base64(max_bytes=100000):
     buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode('ascii')
 '''
+    
+    # Wrap agent code in a try/except block for guaranteed output
+    wrapped_code = f"""
+results = {{}}
+try:
+    {code}
+    print(json.dumps({{'status':'success','result':results}}, default=str), flush=True)
+except Exception as e:
+    error_str = traceback.format_exc()
+    print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
+"""
 
     script_lines = []
     script_lines.extend(preamble)
     script_lines.append(helper)
-    script_lines.append("\nresults = {}\n")
-    script_lines.append(code)
-    script_lines.append("\nprint(json.dumps({'status':'success','result':results}, default=str), flush=True)\n")
+    script_lines.append(wrapped_code)
 
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
     tmp.write("\n".join(script_lines))
@@ -319,9 +341,11 @@ def plot_to_base64(max_bytes=100000):
 
     try:
         completed = subprocess.run([sys.executable, tmp_path], capture_output=True, text=True, timeout=timeout)
-        if completed.returncode != 0:
-            return {"status": "error", "message": completed.stderr.strip() or completed.stdout.strip()}
+        
         out = completed.stdout.strip()
+        if not out:
+            return {"status": "error", "message": completed.stderr.strip() or "Unknown execution error"}
+
         try:
             parsed = json.loads(out)
             return parsed
