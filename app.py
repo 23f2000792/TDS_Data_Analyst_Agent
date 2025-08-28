@@ -25,7 +25,8 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi import FastAPI
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-
+from fastapi import Request
+import inspect
 
 import requests
 import pandas as pd
@@ -232,7 +233,6 @@ def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: i
         "import matplotlib",
         "matplotlib.use('Agg')",
         "import matplotlib.pyplot as plt",
-        "import networkx as nx",
         "from io import BytesIO",
         "import base64",
         "from typing import Dict, Any, List"
@@ -327,7 +327,6 @@ llm = ChatOpenAI(
     openai_api_key=os.getenv("OPENAI_API_KEY")
 )
 
-
 # Tools list for agent (LangChain tool decorator returns metadata for the LLM)
 tools = [scrape_url_to_dataframe]
 
@@ -358,13 +357,13 @@ You must:
 
 agent = create_tool_calling_agent(
     llm=llm,
-    tools=[scrape_url_to_dataframe],
+    tools=tools,
     prompt=prompt
 )
 
 agent_executor = AgentExecutor(
     agent=agent,
-    tools=[scrape_url_to_dataframe],
+    tools=tools,
     verbose=True,
     max_iterations=3,
     handle_parsing_errors=True,
@@ -435,7 +434,9 @@ def run_agent_safely(llm_input: str) -> Dict:
 
 from fastapi import Request
 
+@app.post("/")
 @app.post("/api")
+@app.post("/api/")
 async def analyze_data(request: Request):
     try:
         form = await request.form()
@@ -629,13 +630,6 @@ DIAG_LLM_KEY_TIMEOUT = 30  # seconds per key/model simple ping test (sync tests 
 DIAG_PARALLELISM = 6       # how many thread workers for sync checks
 RUN_LONGER_CHECKS = False  # Playwright/duckdb tests run only if true (they can be slow)
 
-# Use existing GEMINI_KEYS / MODEL_HIERARCHY from your app. If not defined, create empty lists.
-try:
-    _GEMINI_KEYS = GEMINI_KEYS
-    _MODEL_HIERARCHY = MODEL_HIERARCHY
-except NameError:
-    _GEMINI_KEYS = []
-    _MODEL_HIERARCHY = []
 
 # helper: iso timestamp
 def _now_iso():
@@ -661,7 +655,7 @@ def _env_check(required=None):
     for k in required:
         out[k] = {"present": bool(os.getenv(k)), "masked": (os.getenv(k)[:4] + "..." + os.getenv(k)[-4:]) if os.getenv(k) else None}
     # Also include simple helpful values
-    out["GOOGLE_MODEL"] = os.getenv("GOOGLE_MODEL")
+    out["OPENAI_MODEL"] = os.getenv("OPENAI_MODEL")
     out["LLM_TIMEOUT_SECONDS"] = os.getenv("LLM_TIMEOUT_SECONDS")
     return out
 
@@ -746,63 +740,6 @@ def _network_probe_sync(url, timeout=30):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# ---- LLM key+model light test (sync) ----
-# tries each key for each model with a short per-call timeout (run in threadpool)
-def _test_gemini_key_model(key, model, ping_text="ping"):
-    """
-    Test a Gemini API key by sending a minimal request.
-    Always returns a pure dict with only primitive types.
-    """
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-    except Exception as e:
-        return {"ok": False, "error": f"langchain_google_genai import error: {e}"}
-
-    try:
-        obj = ChatGoogleGenerativeAI(
-            model=model,
-            temperature=0,
-            google_api_key=key
-        )
-
-        def extract_text(resp):
-            """Normalize any type of LLM response into a clean string."""
-            try:
-                if resp is None:
-                    return None
-                if isinstance(resp, str):
-                    return resp
-                if hasattr(resp, "content") and isinstance(resp.content, str):
-                    return resp.content
-                if hasattr(resp, "text") and isinstance(resp.text, str):
-                    return resp.text
-                # For objects with .dict() method
-                if hasattr(resp, "dict"):
-                    try:
-                        return str(resp.dict())
-                    except Exception:
-                        pass
-                return str(resp)
-            except Exception as e:
-                return f"[unreadable response: {e}]"
-
-        # First try invoke()
-        try:
-            resp = obj.invoke(ping_text)
-            text = extract_text(resp)
-            return {"ok": True, "model": model, "summary": text[:200] if text else None}
-        except Exception as e_invoke:
-            # Try __call__()
-            try:
-                resp = obj.__call__(ping_text)
-                text = extract_text(resp)
-                return {"ok": True, "model": model, "summary": text[:200] if text else None}
-            except Exception as e_call:
-                return {"ok": False, "error": f"invoke failed: {e_invoke}; call failed: {e_call}"}
-
-    except Exception as e_outer:
-        return {"ok": False, "error": str(e_outer)}
-
 # ---- Async wrappers that call the sync checks in threadpool ----
 async def check_network():
     coros = []
@@ -816,35 +753,6 @@ async def check_network():
         else:
             out[name] = res
     return out
-
-async def check_llm_keys_models():
-    """Try all GEMINI_KEYS on each model (light-touch). Runs in threadpool with per-key timeout."""
-    if not _GEMINI_KEYS:
-        return {"warning": "no GEMINI_KEYS configured"}
-
-    results = []
-    # we will stop early if we find a working combo but still record attempts
-    for model in (_MODEL_HIERARCHY or ["gemini-2.5-pro"]):
-        # test keys in parallel for this model
-        tasks = []
-        for key in _GEMINI_KEYS:
-            tasks.append(run_in_thread(_test_gemini_key_model, key, model, timeout=DIAG_LLM_KEY_TIMEOUT))
-        completed = await asyncio.gather(*[asyncio.create_task(t) for t in tasks], return_exceptions=True)
-        model_summary = {"model": model, "attempts": []}
-        any_ok = False
-        for key, res in zip(_GEMINI_KEYS, completed):
-            if isinstance(res, Exception):
-                model_summary["attempts"].append({"key_mask": (key[:4] + "..." + key[-4:]) if key else None, "ok": False, "error": str(res)})
-            else:
-                # res is dict returned by _test_gemini_key_model
-                model_summary["attempts"].append({"key_mask": (key[:4] + "..." + key[-4:]) if key else None, **res})
-                if res.get("ok"):
-                    any_ok = True
-        results.append(model_summary)
-        if any_ok:
-            # stop once first model has a working key (respecting MODEL_HIERARCHY)
-            break
-    return {"models_tested": results}
 
 # ---- Optional slow heavy checks (DuckDB, Playwright) ----
 async def check_duckdb():
@@ -888,14 +796,13 @@ async def diagnose(full: bool = Query(False, description="If true, run extended 
 
     # prepare tasks
     tasks = {
-        "env": run_in_thread(_env_check, ["GOOGLE_API_KEY", "GOOGLE_MODEL", "LLM_TIMEOUT_SECONDS"], timeout=3),
+        "env": run_in_thread(_env_check, ["OPENAI_API_KEY", "OPENAI_MODEL", "LLM_TIMEOUT_SECONDS"], timeout=3),
         "system": run_in_thread(_system_info, timeout=30),
         "tmp_write": run_in_thread(_temp_write_test, timeout=30),
         "cwd_write": run_in_thread(_app_write_test, timeout=30),
         "pandas": run_in_thread(_pandas_pipeline_test, timeout=30),
         "packages": run_in_thread(_installed_packages_sample, timeout=50),
         "network": asyncio.create_task(check_network()),
-        "llm_keys_models": asyncio.create_task(check_llm_keys_models())
     }
 
     if full or RUN_LONGER_CHECKS:
