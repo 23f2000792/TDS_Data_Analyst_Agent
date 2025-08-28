@@ -24,3 +24,5 @@ langchain-openai
 python-multipart
 scipy
 scikit-learn
+psutil
+httpx
