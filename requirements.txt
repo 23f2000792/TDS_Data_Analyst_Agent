@@ -26,3 +26,4 @@ scipy
 scikit-learn
 psutil
 httpx
+json5
