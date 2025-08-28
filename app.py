@@ -1,25 +1,34 @@
 import os
+import networkx as nx
 import re
 import json
 import base64
 import tempfile
 import sys
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
+import os
+import inspect
+import re
+import json
+import base64
+import tempfile
 import subprocess
 import logging
 from io import BytesIO
 from typing import Dict, Any, List, Tuple
-
-import requests
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Optional image conversion
 try:
@@ -336,7 +345,6 @@ llm = ChatOpenAI(
     model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     temperature=0,
     openai_api_key=os.getenv("OPENAI_API_KEY"),
-    # Enforce JSON-only final messages from the model
     response_format={"type": "json_object"},
 )
 
@@ -349,9 +357,9 @@ prompt = ChatPromptTemplate.from_messages(
             """You are a full-stack autonomous data analyst agent.
 
 You will receive:
-- A set of rules for this request (these rules may differ depending on whether a dataset is uploaded or not)
-- One or more questions
-- An optional dataset preview
+- A set of **rules** for this request (these rules may differ depending on whether a dataset is uploaded or not)
+- One or more **questions**
+- An optional **dataset preview**
 
 You must:
 1) Follow the provided rules exactly.
@@ -378,7 +386,7 @@ agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
     verbose=True,
-    max_iterations=6,  # a bit more room to think
+    max_iterations=6,
     handle_parsing_errors=True,
     return_intermediate_steps=False,
 )
@@ -409,7 +417,6 @@ def run_agent_safely(llm_input: str) -> Dict[str, Any]:
 
         parsed = clean_llm_output(raw_out)
         if "error" in parsed:
-            # Make it explicit that the agent didn't produce JSON
             return {
                 "error": f"LLM did not return valid JSON: {parsed.get('error')}",
                 "raw": parsed.get("raw", raw_out[:500]),
@@ -631,8 +638,8 @@ async def analyze_get_info():
 # System Diagnostics
 # -----------------------------
 DIAG_NETWORK_TARGETS = {
-    "OpenAI": "https://api.openai.com",
-    "GitHub": "https://api.github.com",
+    "OpenAI": "[https://api.openai.com](https://api.openai.com)",
+    "GitHub": "[https://api.github.com](https://api.github.com)",
 }
 DIAG_LLM_KEY_TIMEOUT = 30
 DIAG_PARALLELISM = 6
