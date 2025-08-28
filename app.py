@@ -195,6 +195,13 @@ def clean_llm_output(output: str) -> Dict:
         # remove triple-fence markers if present
         s = re.sub(r"^```(?:json)?\s*", "", output.strip())
         s = re.sub(r"\s*```$", "", s)
+        
+        # --- FIX START ---
+        # Find and fix invalid backslash escapes before parsing.
+        # This looks for a backslash that is NOT followed by a valid JSON escape character.
+        s = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
+        # --- FIX END ---
+        
         # find outermost JSON object by scanning for balanced braces
         first = s.find("{")
         last = s.rfind("}")
@@ -214,6 +221,7 @@ def clean_llm_output(output: str) -> Dict:
             return {"error": f"JSON parsing failed: {str(e)}", "raw": candidate}
     except Exception as e:
         return {"error": str(e)}
+
 
 SCRAPE_FUNC = r'''
 from typing import Dict, Any
