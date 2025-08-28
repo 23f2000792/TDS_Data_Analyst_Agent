@@ -113,7 +113,7 @@ def parse_keys_and_types(raw_questions: str) -> Tuple[List[str], Dict[str, Any]]
 # Tools
 # -----------------------------
 @tool
-def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
+def scrape_url_to_dataframe(url: str) -> str:
     """
     Fetch a URL and return data as a DataFrame (supports HTML tables, CSV, Excel, Parquet, JSON, and plain text).
     Always returns a JSON string with {"status": "success", "data": [...], "columns": [...]} if fetch works.
@@ -193,14 +193,12 @@ def scrape_url_to_dataframe(url: str) -> Dict[str, Any]:
         # Normalize columns
         df.columns = df.columns.map(str).str.replace(r"\[.*\]", "", regex=True).str.strip()
 
-        return {
-            "status": "success",
-            "data": df.to_dict(orient="records"),
-            "columns": df.columns.tolist()
-        }
+        return json.dumps(
+            {"status": "success", "data": df.to_dict(orient="records"), "columns": df.columns.tolist()}
+        )
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 # -----------------------------
@@ -250,36 +248,27 @@ def clean_llm_output(output: str) -> Dict[str, Any]:
 
 def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
     """
-    Write a temp python file which:
-      - provides a safe environment (imports)
-      - loads df/from pickle if provided into df and data variables
-      - defines a robust plot_to_base64() helper that ensures < 100kB
-      - executes the user code (which should populate `results` dict)
-      - prints json.dumps({"status":"success","result":results})
-    Returns dict with parsed JSON or error details.
+    Writes and executes a Python script in a temporary file.
+    The script is expected to print a JSON object to stdout.
     """
-    preamble = [
-        "import json, sys, gc, traceback",
-        "import pandas as pd, numpy as np",
-        "import matplotlib",
-        "matplotlib.use('Agg')",
-        "import matplotlib.pyplot as plt",
-        "from io import BytesIO",
-        "import base64",
-    ]
-    if PIL_AVAILABLE:
-        preamble.append("from PIL import Image")
+    # Create file content
+    script_to_run = f"""
+import json, sys, gc, traceback
+import pandas as pd, numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import networkx as nx
+from io import BytesIO
+import base64
+from typing import Dict, Any, List
 
-    if injected_pickle:
-        preamble.append(f"df = pd.read_pickle(r'''{injected_pickle}''')\n")
-        preamble.append("data = df.to_dict(orient='records')\n")
-    else:
-        preamble.append("data = globals().get('data', {})\n")
-
-    helper = r'''
 def plot_to_base64(max_bytes=100000):
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+    plt.clf()
+    plt.close('all')
+    gc.collect()
     buf.seek(0)
     img_bytes = buf.getvalue()
     if len(img_bytes) <= max_bytes:
@@ -288,40 +277,20 @@ def plot_to_base64(max_bytes=100000):
     for dpi in [80, 60, 50, 40, 30]:
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
+        plt.clf()
+        plt.close('all')
+        gc.collect()
         buf.seek(0)
         b = buf.getvalue()
         if len(b) <= max_bytes:
             return base64.b64encode(b).decode('ascii')
-    # if Pillow available, try WEBP
-    try:
-        from PIL import Image
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
-        buf.seek(0)
-        im = Image.open(buf)
-        out_buf = BytesIO()
-        im.save(out_buf, format='WEBP', quality=80, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
-        if len(ob) <= max_bytes:
-            return base64.b64encode(ob).decode('ascii')
-        out_buf = BytesIO()
-        im.save(out_buf, format='WEBP', quality=60, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
-        if len(ob) <= max_bytes:
-            return base64.b64encode(ob).decode('ascii')
-    except Exception:
-        pass
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
-    buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode('ascii')
-'''
-    
-    # Wrap agent code in a try/except block for guaranteed output
-    wrapped_code = f"""
+    return base64.b64encode(b).decode('ascii')
+
 results = {{}}
+df = None
+if "{injected_pickle}":
+    df = pd.read_pickle(r'''{injected_pickle}''')
+
 try:
     {code}
     print(json.dumps({{'status':'success','result':results}}, default=str), flush=True)
@@ -329,20 +298,14 @@ except Exception as e:
     error_str = traceback.format_exc()
     print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
 """
-
-    script_lines = []
-    script_lines.extend(preamble)
-    script_lines.append(helper)
-    script_lines.append(wrapped_code)
-
+    
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
-    tmp.write("\n".join(script_lines))
-    tmp.flush()
-    tmp_path = tmp.name
-    tmp.close()
+    tmp.write(script_to_run)
+    tmp.flush(); tmp_path = tmp.name; tmp.close()
 
     try:
-        completed = subprocess.run([sys.executable, tmp_path], capture_output=True, text=True, timeout=timeout)
+        completed = subprocess.run([sys.executable, tmp_path],
+                                     capture_output=True, text=True, timeout=timeout)
         
         out = completed.stdout.strip()
         if not out:
@@ -353,6 +316,7 @@ except Exception as e:
             return parsed
         except Exception as e:
             return {"status": "error", "message": f"Could not parse JSON output: {str(e)}", "raw": out}
+            
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": "Execution timed out"}
     finally:
@@ -462,8 +426,12 @@ def run_agent_safely(llm_input: str) -> Dict[str, Any]:
         pickle_path = None
         if urls:
             url = urls[0]
-            tool_resp = scrape_url_to_dataframe(url)
-            
+            tool_resp_str = scrape_url_to_dataframe(url)
+            try:
+                tool_resp = json.loads(tool_resp_str)
+            except Exception as e:
+                return {"error": f"Scrape tool returned non-JSON", "raw": tool_resp_str[:500]}
+
             if tool_resp.get("status") != "success":
                 return {"error": f"Scrape tool failed: {tool_resp.get('message')}"}
 
