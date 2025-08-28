@@ -232,38 +232,21 @@ def clean_llm_output(output: str) -> Dict:
 
 def write_and_run_temp_python(code: str, injected_pickle: str = None, timeout: int = 60) -> Dict[str, Any]:
     """
-    Write a temp python file which:
-      - provides a safe environment (imports)
-      - loads df/from pickle if provided into df and data variables
-      - defines a robust plot_to_base64() helper that ensures < 100kB (attempts resizing/conversion)
-      - executes the user code (which should populate `results` dict)
-      - prints json.dumps({"status":"success","result":results})
-    Returns dict with parsed JSON or error details.
+    Writes and executes a Python script in a temporary file.
+    The script is expected to print a JSON object to stdout.
     """
-    # create file content
-    preamble = [
-        "import json, sys, gc, traceback",
-        "import pandas as pd, numpy as np",
-        "import matplotlib",
-        "matplotlib.use('Agg')",
-        "import matplotlib.pyplot as plt",
-        "import networkx as nx",
-        "from io import BytesIO",
-        "import base64",
-        "from typing import Dict, Any, List"
-    ]
-    if PIL_AVAILABLE:
-        preamble.append("from PIL import Image")
-    # inject df if a pickle path provided
-    if injected_pickle:
-        preamble.append(f"df = pd.read_pickle(r'''{injected_pickle}''')\n")
-        preamble.append("data = df.to_dict(orient='records')\n")
-    else:
-        # ensure data exists so user code that references data won't break
-        preamble.append("data = globals().get('data', {})\n")
+    # Create file content
+    script_to_run = f"""
+import json, sys, gc, traceback
+import pandas as pd, numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import networkx as nx
+from io import BytesIO
+import base64
+from typing import Dict, Any, List
 
-    # plot_to_base64 helper that tries to reduce size under 100_000 bytes
-    helper = r'''
 def plot_to_base64(max_bytes=100000):
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
@@ -285,65 +268,23 @@ def plot_to_base64(max_bytes=100000):
         b = buf.getvalue()
         if len(b) <= max_bytes:
             return base64.b64encode(b).decode('ascii')
-    # if Pillow available, try convert to WEBP which is typically smaller
-    try:
-        from PIL import Image
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=40)
-        plt.clf()
-        plt.close('all')
-        gc.collect()
-        buf.seek(0)
-        im = Image.open(buf)
-        out_buf = BytesIO()
-        im.save(out_buf, format='WEBP', quality=80, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
-        if len(ob) <= max_bytes:
-            return base64.b64encode(ob).decode('ascii')
-        # try lower quality
-        out_buf = BytesIO()
-        im.save(out_buf, format='WEBP', quality=60, method=6)
-        out_buf.seek(0)
-        ob = out_buf.getvalue()
-        if len(ob) <= max_bytes:
-            return base64.b64encode(ob).decode('ascii')
-    except Exception:
-        pass
-    # as last resort return downsized PNG even if > max_bytes
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=20)
-    plt.clf()
-    plt.close('all')
-    gc.collect()
-    buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode('ascii')
-'''
-    
-    # Wrap agent code in a function and a try/except block for guaranteed output
-    wrapped_code = f"""
-def agent_code():
-    results = {{}}
-    {code}
-    return results
+    return base64.b64encode(b).decode('ascii')
+
+results = {{}}
+df = None
+if "{injected_pickle}":
+    df = pd.read_pickle(r'''{injected_pickle}''')
 
 try:
-    final_results = agent_code()
-    print(json.dumps({{'status':'success','result':final_results}}, default=str), flush=True)
+    {code}
+    print(json.dumps({{'status':'success','result':results}}, default=str), flush=True)
 except Exception as e:
     error_str = traceback.format_exc()
     print(json.dumps({{'status':'error','message':error_str}}, default=str), flush=True)
 """
-
-    script_lines = []
-    script_lines.extend(preamble)
-    script_lines.append("\n# Injected scrape_url_to_dataframe\n")
-    script_lines.append(inspect.getsource(scrape_url_to_dataframe.func).replace("@tool", ""))
-    script_lines.append(helper)
-    script_lines.append(wrapped_code)
     
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
-    tmp.write("\n".join(script_lines))
+    tmp.write(script_to_run)
     tmp.flush(); tmp_path = tmp.name; tmp.close()
 
     try:
@@ -352,8 +293,6 @@ except Exception as e:
         
         out = completed.stdout.strip()
         if not out:
-            # If stdout is empty, there was a catastrophic error before JSON could be printed.
-            # Return stderr instead.
             return {"status": "error", "message": completed.stderr.strip() or "Unknown execution error"}
 
         try:
@@ -399,10 +338,7 @@ prompt = ChatPromptTemplate.from_messages([
 5. The `results` dictionary keys must EXACTLY match the snake_case keys from the task description.
 6. **CRITICAL RULE: You MUST ONLY use the data provided (either from the `df` variable or by calling the `scrape_url_to_dataframe` function). DO NOT invent, hallucinate, or synthesize data under any circumstances.**
 7. If a question cannot be answered from the available data, the value for that key in the `results` dictionary MUST be the string "Not applicable".
-8. The following functions are available in the execution environment. DO NOT redefine or import them:
-   - `scrape_url_to_dataframe(url: str) -> dict`: Fetches data from a URL.
-   - `plot_to_base64() -> str`: Converts the current matplotlib plot to a base64 string.
-9. Your code must not contain any import statements other than for pandas, numpy, and matplotlib.
+8. Your code MUST include all necessary imports (e.g., pandas, numpy, matplotlib, base64, io, etc.).
 """),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -414,15 +350,15 @@ agent = create_tool_calling_agent(
     prompt=prompt
 )
 
-agent_executor = AgentExecutor.from_agent_and_tools(
+agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
     verbose=True,
     max_iterations=5,
+    early_stopping_method="generate",
     handle_parsing_errors=lambda e: f"Output parsing error: {e}",
-    return_intermediate_steps=False,
+    return_intermediate_steps=False
 )
-
 
 # -----------------------------
 # Runner
