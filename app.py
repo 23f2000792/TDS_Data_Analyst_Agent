@@ -406,12 +406,18 @@ def plot_to_base64(max_bytes=100000):
 # -----------------------------
 # LLM agent setup
 # -----------------------------
-# Ensure your OPENAI_API_KEY and OPENAI_MODEL are set in your .env file or environment variables.
-llm = ChatOpenAI(
-    model=os.getenv("OPENAI_MODEL", "o3-mini"),
-    temperature=0,
-    openai_api_key=os.getenv("OPENAI_API_KEY")
-)
+model_name = os.getenv("OPENAI_MODEL", "o3-mini")
+
+kwargs = {
+    "model": model_name,
+    "openai_api_key": os.getenv("OPENAI_API_KEY")
+}
+
+# Only add temperature if the model supports it
+if not model_name.startswith("o"):  # exclude o1, o3, etc.
+    kwargs["temperature"] = 0
+
+llm = ChatOpenAI(**kwargs)
 
 
 # Tools list for agent (LangChain tool decorator returns metadata for the LLM)
